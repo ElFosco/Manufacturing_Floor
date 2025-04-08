@@ -154,8 +154,9 @@ class MFModel(ABC):
     dict_index_action = transform_dict(info)
 
     #freeze location
-    for dv in self.job_resource:
-      self.model += dv == dv.value()
+    if self.parallel:
+      for dv in self.job_resource:
+        self.model += dv == dv.value()
 
     if not self.parallel:
       for res in self.dict_resource_job:
