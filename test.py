@@ -1,7 +1,11 @@
-import cpmpy as cp
+# import cpmpy as cp
 
 
-model = cp.Model()
-model += ~cp.all([False])
 
-model.solve()
+
+
+
+
+for resource in ['human','WS - Kitting', 'WS - Assembly', 'WS - Packing', 'Mobile Robot']:
+
+
