@@ -1,12 +1,10 @@
 import os
-import tkinter as tk
-from tkinter import ttk
-from PIL import Image, ImageTk, ImageSequence
-import sv_ttk
+import webbrowser
 
-from jobshop_model import FJTransportProblem
+from utility.jobshop_model_transport import FJTransportProblem
 from utility.costant import TYPE_TO_SUBTYPES, WS_KITTING, WS_BUILDING_1, WS_BUILDING_2, WS_PALLETTING, HUMAN_JOBS_TIME, \
     FLASHLIGHT_CLIPPED, FLASHLIGHT_SCREWS
+from utility.item_definitions import get_all_item_names, get_item_definition
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -16,6 +14,12 @@ import sv_ttk
 
 # Instantiate your problem
 problem = FJTransportProblem(symmetry_breaking=True)
+solutions_table = None
+product_table = None
+product_totals = None
+product_items_map = None
+product_max_per_item = 6
+update_ws_registry_hook = None
 
 # =========================
 # UI helpers (images / GIF)
@@ -74,7 +78,7 @@ def make_section(parent, title, img_path=None, max_w=800, max_h=400, border=True
 
     img_label = None
     if img_path:
-        img_label = ttk.Label(inner)
+        img_label = ttk.Label(inner, anchor="center")
         img_label.pack(expand=True, fill="both")
 
         if img_path.lower().endswith(".gif"):
@@ -86,6 +90,47 @@ def make_section(parent, title, img_path=None, max_w=800, max_h=400, border=True
             img_label.configure(image=im)
 
     return outer, inner, img_label
+
+# =========================
+# Helpers for solution log
+# =========================
+def build_config_summary(prob: FJTransportProblem) -> str:
+    try:
+        num_items = len(getattr(prob, "items_to_build", {}) or {})
+        num_conns = len(getattr(prob, "connected_via_conveyor", []) or [])
+        res = getattr(prob, "resources", {}) or {}
+        # Count by high-level roles
+        def count_type(key):
+            lst = res.get(key, [])
+            return len(lst) if lst is not None else 0
+        from utility.costant import KIT, ASM, PACK
+        kits = count_type(KIT)
+        asms = count_type(ASM)
+        packs = count_type(PACK)
+        humans = len(res.get('human', []) or [])
+        return f"Items:{num_items} | KIT:{kits} ASM:{asms} PALLET:{packs} Human:{humans} | Belts:{num_conns}"
+    except Exception:
+        return "(summary unavailable)"
+
+def reset_product_selection():
+    """Clear items to build and reset the totals table in the UI if present."""
+    try:
+        # Reset model items
+        if hasattr(problem, "items_to_build"):
+            problem.items_to_build = {}
+            if hasattr(problem, "max_id_item"):
+                problem.max_id_item = 0
+        # Reset UI table
+        global product_table, product_totals, product_items_map
+        if product_table is not None and product_totals is not None and product_items_map is not None:
+            for name in product_items_map.keys():
+                product_totals[name] = 0
+                try:
+                    product_table.item(name, values=(name, 0))
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
 # =====================================
 # Workstation mapping / validation
@@ -193,12 +238,35 @@ def bind_topology_controls(parent_frame, topology_img_label, img_max_w=800, img_
             subtype_cb.state(["disabled"])
 
     def preview_topology():
-        """Load './images/topology.jpg' into the left-top preview."""
+        """Load './images/topology.jpg' into the left-top preview using responsive fit."""
         try:
             stop_gif(topology_img_label)
-            img = load_image("./images/topology.jpg", img_max_w, img_max_h)
-            topology_img_label.image = img
-            topology_img_label.configure(image=img)
+            from PIL import Image
+            pil_img = Image.open("./images/topology.jpg")
+            topology_img_label._pil_image = pil_img
+
+            def fit_image_to_label(label, pil_image):
+                if pil_image is None:
+                    return
+                w = label.winfo_width()
+                h = label.winfo_height()
+                if w > 1 and h > 1:
+                    src_w, src_h = pil_image.size
+                    target_w = min(w, src_w)
+                    target_h = min(h, src_h)
+                    img_copy = pil_image.copy()
+                    img_copy.thumbnail((target_w, target_h), Image.LANCZOS)
+                    tk_img = ImageTk.PhotoImage(img_copy)
+                    label.configure(image=tk_img)
+                    label.image = tk_img
+
+            fit_image_to_label(topology_img_label, pil_img)
+            topology_img_label.bind(
+                "<Configure>",
+                lambda e: fit_image_to_label(
+                    topology_img_label, getattr(topology_img_label, "_pil_image", None)
+                )
+            )
         except Exception as e:
             messagebox.showerror("Preview error", f"Failed to load topology image: {e}")
 
@@ -206,6 +274,28 @@ def bind_topology_controls(parent_frame, topology_img_label, img_max_w=800, img_
         display = [f"{entry['id']} — {entry['role']}" for entry in ws_registry]
         from_cb["values"] = display
         to_cb["values"] = display
+
+    def rebuild_ws_registry_from_problem():
+        try:
+            ws_registry.clear()
+            from utility.costant import KIT, ASM, PACK
+            for typ, lst in getattr(problem, "resources", {}).items():
+                if typ == 'human':
+                    continue
+                if typ == KIT:
+                    for mid, sub in lst:
+                        ws_registry.append({"id": mid, "role": "KIT"})
+                elif typ == PACK:
+                    for mid, sub in lst:
+                        ws_registry.append({"id": mid, "role": "PALLET"})
+                elif typ == ASM:
+                    for mid, sub in lst:
+                        role = "GRIP" if sub == FLASHLIGHT_CLIPPED else ("GRIP & SCREW" if sub == FLASHLIGHT_SCREWS else "ASM")
+                        ws_registry.append({"id": mid, "role": role})
+            ws_registry.sort(key=lambda e: e["id"])  # stable order
+            update_ws_id_options()
+        except Exception:
+            pass
 
     def add_workstation():
         t = (type_var.get() or "").strip()
@@ -217,6 +307,7 @@ def bind_topology_controls(parent_frame, topology_img_label, img_max_w=800, img_
 
         if t == "HUMAN":
             try:
+                reset_product_selection()
                 problem.add_human()
                 problem.set_dur_hum(HUMAN_JOBS_TIME)
                 ensure_dir_for("./images/topology.jpg")
@@ -237,6 +328,7 @@ def bind_topology_controls(parent_frame, topology_img_label, img_max_w=800, img_
             return
 
         try:
+            reset_product_selection()
             new_id = problem.add_workstation(const_value)
             role = CONST_TO_ROLE[const_name]
             ws_registry.append({"id": new_id, "role": role})
@@ -245,6 +337,11 @@ def bind_topology_controls(parent_frame, topology_img_label, img_max_w=800, img_
             ensure_dir_for("./images/topology.jpg")
             problem.make_ws_topology(location="./images/topology.jpg")
             preview_topology()
+            try:
+                if update_ws_registry_hook:
+                    update_ws_registry_hook()
+            except Exception:
+                pass
         except Exception as e:
             messagebox.showerror("Problem error", f"Failed to add workstation or update preview: {e}")
 
@@ -298,6 +395,7 @@ def bind_topology_controls(parent_frame, topology_img_label, img_max_w=800, img_
             return
 
         try:
+            reset_product_selection()
             problem.add_transport(id_from, id_to)
             ensure_dir_for("./images/topology.jpg")
             problem.make_ws_topology(location="./images/topology.jpg")
@@ -311,6 +409,10 @@ def bind_topology_controls(parent_frame, topology_img_label, img_max_w=800, img_
 
     type_cb.set("KIT")
     update_subtype_state()
+
+    # Expose a hook to refresh registry after external layout changes
+    global update_ws_registry_hook
+    update_ws_registry_hook = rebuild_ws_registry_from_problem
 
 # =====================================
 # Pre-made topology (3 layouts)
@@ -369,13 +471,13 @@ def bind_premade_topology(parent_frame, topology_img_label, img_max_w=800, img_m
     parent_frame.rowconfigure(0, weight=1)
 
     # Row container (grid into parent_frame)
-    row = ttk.Frame(parent_frame, padding=8)
+    row = ttk.Frame(parent_frame, padding=4)
     row.grid(row=0, column=0, sticky="nsew")
-
-    # 3 equal columns in 'row'
-    row.columnconfigure(0, weight=1, uniform="layouts")
-    row.columnconfigure(1, weight=1, uniform="layouts")
-    row.columnconfigure(2, weight=1, uniform="layouts")
+    row.columnconfigure(0, weight=1)
+    row.columnconfigure(1, weight=0)
+    row.columnconfigure(2, weight=0)
+    row.columnconfigure(3, weight=0)
+    row.columnconfigure(4, weight=1)
 
     def refresh_preview():
         ensure_dir_for("./images/topology.jpg")
@@ -392,8 +494,11 @@ def bind_premade_topology(parent_frame, topology_img_label, img_max_w=800, img_m
                 w = label.winfo_width()
                 h = label.winfo_height()
                 if w > 1 and h > 1:
+                    src_w, src_h = pil_image.size
+                    target_w = min(w, src_w)
+                    target_h = min(h, src_h)
                     img_copy = pil_image.copy()
-                    img_copy.thumbnail((w, h), Image.LANCZOS)
+                    img_copy.thumbnail((target_w, target_h), Image.LANCZOS)
                     tk_img = ImageTk.PhotoImage(img_copy)
                     label.configure(image=tk_img)
                     label.image = tk_img
@@ -410,10 +515,17 @@ def bind_premade_topology(parent_frame, topology_img_label, img_max_w=800, img_m
 
     def run_layout(apply_fn):
         try:
+            reset_product_selection()
             apply_fn()  # creates new problem and builds it
             ensure_dir_for("./images/topology.jpg")
             problem.make_ws_topology(location="./images/topology.jpg")
             refresh_preview()
+            # Refresh the topology comboboxes with IDs from the rebuilt model
+            try:
+                if update_ws_registry_hook:
+                    update_ws_registry_hook()
+            except Exception:
+                pass
         except Exception as e:
             messagebox.showerror("Layout error", f"Failed to apply layout: {e}")
 
@@ -424,12 +536,14 @@ def bind_premade_topology(parent_frame, topology_img_label, img_max_w=800, img_m
         problem.set_dur_hum(HUMAN_JOBS_TIME)
 
         id_kit = problem.add_workstation(WS_KITTING)
+
         id_grip = problem.add_workstation(WS_BUILDING_1)
         id_gs = problem.add_workstation(WS_BUILDING_2)
         id_pal = problem.add_workstation(WS_PALLETTING)
 
         problem.add_transport(id_kit, id_grip)
         problem.add_transport(id_grip, id_gs)
+        problem.add_transport(id_grip, id_pal)
         problem.add_transport(id_gs, id_pal)
 
     def apply_layout_2():
@@ -438,14 +552,19 @@ def bind_premade_topology(parent_frame, topology_img_label, img_max_w=800, img_m
         problem.add_human()
         problem.set_dur_hum(HUMAN_JOBS_TIME)
 
-        id_kit = problem.add_workstation(WS_KITTING)
-        id_grip = problem.add_workstation(WS_BUILDING_1)
+        id_kit_1 = problem.add_workstation(WS_KITTING)
+        id_kit_2 = problem.add_workstation(WS_KITTING)
+
+        id_grip_1 = problem.add_workstation(WS_BUILDING_1)
+        id_grip_2 = problem.add_workstation(WS_BUILDING_1)
         id_gs = problem.add_workstation(WS_BUILDING_2)
         id_pal = problem.add_workstation(WS_PALLETTING)
 
-        problem.add_transport(id_kit, id_grip)
-        problem.add_transport(id_kit, id_gs)
-        problem.add_transport(id_grip, id_pal)
+        problem.add_transport(id_kit_1, id_grip_1)
+        problem.add_transport(id_kit_2,id_grip_2)
+        problem.add_transport(id_grip_1, id_pal)
+        problem.add_transport(id_grip_2, id_gs)
+        problem.add_transport(id_grip_2, id_pal)
         problem.add_transport(id_gs, id_pal)
 
     def apply_layout_3():
@@ -456,27 +575,55 @@ def bind_premade_topology(parent_frame, topology_img_label, img_max_w=800, img_m
 
         id_kit1 = problem.add_workstation(WS_KITTING)
         id_kit2 = problem.add_workstation(WS_KITTING)
-        id_grip = problem.add_workstation(WS_BUILDING_1)
-        id_gs = problem.add_workstation(WS_BUILDING_2)
-        id_pal = problem.add_workstation(WS_PALLETTING)
 
-        problem.add_transport(id_kit1, id_grip)
-        problem.add_transport(id_kit2, id_grip)
-        problem.add_transport(id_grip, id_gs)
-        problem.add_transport(id_gs, id_pal)
+
+        id_grip_1 = problem.add_workstation(WS_BUILDING_1)
+        id_gs_1 = problem.add_workstation(WS_BUILDING_1)
+        id_gs_2 = problem.add_workstation(WS_BUILDING_2)
+
+        id_pal_1 = problem.add_workstation(WS_PALLETTING)
+        id_pal_2 = problem.add_workstation(WS_PALLETTING)
+
+        problem.add_transport(id_kit1, id_grip_1)
+        problem.add_transport(id_kit1, id_gs_1)
+        problem.add_transport(id_grip_1, id_pal_1)
+        problem.add_transport(id_gs_1, id_pal_1)
+
+        problem.add_transport(id_kit2, id_gs_2)
+        problem.add_transport(id_gs_2, id_pal_2)
 
 
 
     # Buttons fill their grid cells
-    ttk.Button(row, text="Layout 1", command=lambda: run_layout(apply_layout_1)).pack(side="left", expand=True,
-                                                                                      fill="both", padx=6, pady=6,
-                                                                                      ipady=8)
-    ttk.Button(row, text="Layout 2", command=lambda: run_layout(apply_layout_2)).pack(side="left", expand=True,
-                                                                                      fill="both", padx=6, pady=6,
-                                                                                      ipady=8)
-    ttk.Button(row, text="Layout 3", command=lambda: run_layout(apply_layout_3)).pack(side="left", expand=True,
-                                                                                      fill="both", padx=6, pady=6,
-                                                                                      ipady=8)
+    ttk.Label(row).grid(row=0, column=0, sticky="ew")  # left spacer
+    ttk.Button(row, text="Layout 1", command=lambda: run_layout(apply_layout_1)).grid(row=0, column=1, padx=6, pady=6)
+    ttk.Button(row, text="Layout 2", command=lambda: run_layout(apply_layout_2)).grid(row=0, column=2, padx=6, pady=6)
+    ttk.Button(row, text="Layout 3", command=lambda: run_layout(apply_layout_3)).grid(row=0, column=3, padx=6, pady=6)
+    ttk.Label(row).grid(row=0, column=4, sticky="ew")  # right spacer
+    
+    # Reset button row (spans half the width of pre-made topology)
+    reset_row = ttk.Frame(parent_frame, padding=4)
+    reset_row.grid(row=1, column=0, sticky="ew")
+    reset_row.columnconfigure(0, weight=1)
+    reset_row.columnconfigure(1, weight=0)
+    reset_row.columnconfigure(2, weight=1)
+    
+    def reset_topology():
+        try:
+            global problem
+            problem = FJTransportProblem(symmetry_breaking=True)
+            reset_product_selection()
+            ensure_dir_for("./images/topology.jpg")
+            problem.make_ws_topology(location="./images/topology.jpg")
+            refresh_preview()
+            if update_ws_registry_hook:
+                update_ws_registry_hook()
+        except Exception as e:
+            messagebox.showerror("Reset error", f"Failed to reset topology: {e}")
+    
+    ttk.Label(reset_row).grid(row=0, column=0, sticky="ew")  # left spacer
+    ttk.Button(reset_row, text="Reset", command=reset_topology).grid(row=0, column=1, padx=6, pady=6)
+    ttk.Label(reset_row).grid(row=0, column=2, sticky="ew")  # right spacer
 
 
 # =====================================
@@ -487,11 +634,22 @@ def bind_product_selection(parent_frame):
     Adds 'product selection' controls + totals table.
     Enforces max 6 per item overall.
     """
-    ITEMS_MAP = {
-        "FLASHLIGHT_CLIPPED": FLASHLIGHT_CLIPPED,
-        "FLASHLIGHT_SCREWS": FLASHLIGHT_SCREWS,
-    }
-    max_per_item = 6
+    # Get all available item names dynamically
+    available_items = get_all_item_names()
+    ITEMS_MAP = {}
+    for item_name in available_items:
+        item_def = get_item_definition(item_name)
+        if item_def:
+            # Map item name to its constant value
+            # For backward compatibility, we still use the old constants
+            if item_name == "FLASHLIGHT_CLIPPED":
+                ITEMS_MAP[item_name] = FLASHLIGHT_CLIPPED
+            elif item_name == "FLASHLIGHT_SCREWS":
+                ITEMS_MAP[item_name] = FLASHLIGHT_SCREWS
+            else:
+                # For new items, use the item name as the value
+                ITEMS_MAP[item_name] = item_name
+    max_per_item = product_max_per_item
     totals = {name: 0 for name in ITEMS_MAP.keys()}
 
     row = ttk.Frame(parent_frame, padding=8)
@@ -520,6 +678,12 @@ def bind_product_selection(parent_frame):
 
     for name in ITEMS_MAP.keys():
         table.insert("", "end", iid=name, values=(name, 0))
+
+    # expose globals for reset
+    global product_table, product_totals, product_items_map
+    product_table = table
+    product_totals = totals
+    product_items_map = ITEMS_MAP
 
     def add_items():
         name = item_var.get()
@@ -556,14 +720,44 @@ def bind_solving_controls(parent_frame, solution_img_label, img_max_w=800, img_m
     """
     Adds a big 'Solve' button that runs the solver and updates the Solution image.
     """
-    solve_btn = ttk.Button(parent_frame, text="Solve", style="Solve.TButton")
-    solve_btn.pack(expand=True, fill="both", padx=20, pady=20, ipady=40)
+    # Buttons row (Solve + Export HTML) centered
+    btn_row = ttk.Frame(parent_frame)
+    btn_row.pack(expand=False, fill="x")
+    try:
+        btn_row.columnconfigure(0, weight=1)
+        btn_row.columnconfigure(1, weight=0)
+        btn_row.columnconfigure(2, weight=0)
+        btn_row.columnconfigure(3, weight=1)
+    except Exception:
+        pass
+
+    solve_btn = ttk.Button(btn_row, text="Solve", style="Solve.TButton")
+    solve_btn.grid(row=0, column=1, padx=(8, 4), pady=8, ipady=6)
+
+    export_btn = ttk.Button(btn_row, text="Export HTML")
+    export_btn.state(["disabled"])  # enabled after a successful solve
+    export_btn.grid(row=0, column=2, padx=(4, 8), pady=8, ipady=6)
+
+    def has_meaningful_content(prob: FJTransportProblem) -> bool:
+        try:
+            if getattr(prob, "items_to_build", None):
+                return True
+            res = getattr(prob, "resources", {}) or {}
+            # any non-empty resource groups
+            for k, v in res.items():
+                if v:
+                    return True
+            return False
+        except Exception:
+            return True
 
     def run_solver():
         try:
-            problem.model_problem()
-            problem.solve(solver="ortools")
-            problem.make_gantt(folder="./images/sol.jpg")
+            # Solve current working model
+            active_prob = problem
+            active_prob.model_problem()
+            active_prob.solve(solver="ortools")
+            active_prob.make_gantt(folder="./images/sol.jpg")
 
             # Load solution image into bottom-left Solution preview
             stop_gif(solution_img_label)
@@ -575,8 +769,11 @@ def bind_solving_controls(parent_frame, solution_img_label, img_max_w=800, img_m
                     return
                 w, h = label.winfo_width(), label.winfo_height()
                 if w > 1 and h > 1:
+                    src_w, src_h = pil_image.size
+                    target_w = min(w, src_w)
+                    target_h = min(h, src_h)
                     img_copy = pil_image.copy()
-                    img_copy.thumbnail((w, h), Image.LANCZOS)
+                    img_copy.thumbnail((target_w, target_h), Image.LANCZOS)
                     tk_img = ImageTk.PhotoImage(img_copy)
                     label.configure(image=tk_img)
                     label.image = tk_img
@@ -589,10 +786,69 @@ def bind_solving_controls(parent_frame, solution_img_label, img_max_w=800, img_m
                 )
             )
 
+            # Enable export after successful solve
+            try:
+                export_btn.state(["!disabled"])
+            except Exception:
+                pass
+
+            # Append to Solutions table
+            try:
+                ms_val = None
+                if hasattr(active_prob, "makespan") and getattr(active_prob.makespan, "value", None):
+                    try:
+                        v = active_prob.makespan.value()
+                        ms_val = int(v) if v is not None else None
+                    except Exception:
+                        ms_val = None
+                ms_text = str(ms_val) if ms_val is not None else "-"
+                cfg = build_config_summary(active_prob)
+                if solutions_table is not None:
+                    solutions_table.insert("", "end", values=(ms_text, cfg))
+            except Exception:
+                pass
+
+            # Keep working with the same model; no automatic reset
+
         except Exception as e:
             messagebox.showerror("Solve error", f"Failed to solve: {e}")
 
+    def export_html():
+        try:
+            # Generate an interactive HTML gantt via the model API
+            ensure_dir_for("./images/dummy")
+            html_path = "./images/image.html"
+            try:
+                # Some versions expect 'folder', others 'location'; keep 'folder' for consistency with image case
+                problem.make_gantt(folder=html_path, html=True)
+            except TypeError:
+                # Fallback to location argument name if needed
+                problem.make_gantt(folder=html_path, html=True)
+
+            # Open in Chrome (fallback to default browser)
+            opened = False
+            for name in ("google-chrome", "chrome", "chromium-browser", "chromium"):
+                try:
+                    b = webbrowser.get(name)
+                    b.open_new_tab(os.path.abspath(html_path))
+                    opened = True
+                    break
+                except Exception:
+                    pass
+            if not opened:
+                try:
+                    webbrowser.open_new_tab(os.path.abspath(html_path))
+                    opened = True
+                except Exception:
+                    pass
+
+            if not opened:
+                messagebox.showinfo("Export HTML", f"Saved: {html_path}\nCould not auto-open in a browser.")
+        except Exception as e:
+            messagebox.showerror("Export HTML", f"Failed to export HTML: {e}")
+
     solve_btn.configure(command=run_solver)
+    export_btn.configure(command=export_html)
 
 # ==============
 # Main UI
@@ -605,14 +861,19 @@ def main():
     # Styles
     style = ttk.Style()
     style.configure("TButton", font=("Helvetica", 12))
-    style.configure("Solve.TButton", font=("Helvetica", 16, "bold"))
+    style.configure("Solve.TButton", font=("Helvetica", 12, "bold"))
 
     container = ttk.Frame(root, padding=12)
     container.pack(fill="both", expand=True)
 
-    # Two columns
+    # Three columns (add right-most 'Solutions' column)
     container.columnconfigure(0, weight=1)
-    container.columnconfigure(1, weight=1)
+    container.columnconfigure(1, weight=3, minsize=520)
+    container.columnconfigure(2, weight=0, minsize=200)
+    # Three rows: 0 = main two-column area, 1 = left-half Solving, 2 = full-width Solution (small)
+    container.rowconfigure(0, weight=1)
+    container.rowconfigure(1, weight=0)
+    container.rowconfigure(2, weight=6, minsize=1)
 
     # LEFT COLUMN (topology preview + solution preview)
     left_frame = ttk.Frame(container)
@@ -624,19 +885,15 @@ def main():
     )
     sec1.pack(side="top", expand=True, fill="both", pady=6)
 
-    # Bottom-left: starts with waiting.gif, later replaced with ./images/sol.jpg
-    sec2, _inner2, solution_img_label = make_section(
-        left_frame, "Solution", "images/waiting.gif", 800, 400
-    )
-    sec2.pack(side="top", expand=True, fill="both", pady=6)
+    # (Moved) Solution section will appear full-width below, spanning both columns
 
     # RIGHT COLUMN (4 rows)
     right_frame = ttk.Frame(container)
-    right_frame.grid(row=0, column=1, sticky="nsew")
+    right_frame.grid(row=0, column=1, rowspan=2, sticky="nsew")
     right_frame.columnconfigure(0, weight=1)
-    right_frame.rowconfigure(0, weight=4)  # Topology Creation
-    right_frame.rowconfigure(1, weight=2)  # Pre-made topology
-    right_frame.rowconfigure(2, weight=2)  # Product selection
+    right_frame.rowconfigure(0, weight=2)  # Topology Creation (bigger)
+    right_frame.rowconfigure(1, weight=2, minsize=110)  # Pre-made topology (bigger)
+    right_frame.rowconfigure(2, weight=1, minsize=200)  # Product selection (minimum height)
     right_frame.rowconfigure(3, weight=1)  # Solving
 
     # Row 0: Topology Creation (buttons: Add Workstation / Add Conveyor Belt / items under this moved out)
@@ -654,10 +911,44 @@ def main():
     frame_products.grid(row=2, column=0, sticky="nsew", padx=6, pady=6)
     bind_product_selection(products_inner)
 
-    # Row 3: Solving (big Solve button -> updates bottom-left Solution image)
-    frame_solving, solving_inner, _ = make_section(right_frame, "Solving", border=True)
-    frame_solving.grid(row=3, column=0, sticky="nsew", padx=6, pady=6)
-    bind_solving_controls(solving_inner, solution_img_label, img_max_w=800, img_max_h=400)
+    # Full-width sections below both columns
+    # Create full-width Solution preview (spans both columns)
+    sec_solution, _inner_solution, solution_img_label = make_section(
+        container, "Solution", "images/waiting.gif", 2000, 1000
+    )
+    sec_solution.grid(row=2, column=0, columnspan=2, sticky="ew", padx=6, pady=6)
+    try:
+        sec_solution.configure(height=150)
+        sec_solution.grid_propagate(False)
+    except Exception:
+        pass
+
+    # Center the solution image within its section
+    try:
+        solution_img_label.pack_forget()
+        solution_img_label.pack(expand=True, fill="both")
+    except Exception:
+        pass
+
+    # Create full-width Solving controls (spans both left columns, placed above Solution)
+    frame_solving_full, solving_inner_full, _ = make_section(container, "Solving", border=True)
+    frame_solving_full.grid(row=1, column=0, columnspan=1, sticky="ew", padx=6, pady=6)
+    bind_solving_controls(solving_inner_full, solution_img_label, img_max_w=400, img_max_h=400)
+
+    # RIGHT-MOST COLUMN: Solutions
+    solutions_frame = ttk.Frame(container)
+    solutions_frame.grid(row=0, column=2, rowspan=3, sticky="nsew", padx=6, pady=6)
+    solutions_section, solutions_inner, _ = make_section(solutions_frame, "Solutions", border=True)
+    solutions_section.pack(expand=True, fill="both")
+
+    # Solutions list (Makespan, Config summary)
+    global solutions_table
+    cols = ("MAKESPAN", "CONFIG")
+    solutions_table = ttk.Treeview(solutions_inner, columns=cols, show="headings", height=12)
+    for head, w in [("MAKESPAN", 100), ("CONFIG", 260)]:
+        solutions_table.heading(head, text=head)
+        solutions_table.column(head, width=w, anchor="w", stretch=True)
+    solutions_table.pack(expand=True, fill="both")
 
     root.minsize(1100, 750)
     root.mainloop()

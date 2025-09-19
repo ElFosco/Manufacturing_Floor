@@ -2,15 +2,11 @@
 KIT, ASM, PACK = 1, 2, 3
 K1, K2, B1, B2, P , KB, BP, B12 = "K1", "K2", "B1", "B2", "P", "KB", "BP", "B12"
 
-FLASHLIGHT_CLIPPED = 0
-FLASHLIGHT_SCREWS = 1
+FLASHLIGHT_CLIPPED = 'FLASHLIGHT_CLIPPED'
+FLASHLIGHT_SCREWS = 'FLASHLIGHT_SCREWS'
 
 
-map_type_stage = { 0:0,
-                   1:1,
-                   2:1,
-                   3:2
-}
+# map_type_stage removed - not used in the generalized system
 
 
 HUMAN_JOBS_TIME = {
