@@ -26,6 +26,7 @@ class FJTransportProblem(FJProblem):
     def set_t_conv(self,t_conv):
         self.t_conv = t_conv
 
+
     def get_all_transitions(self):
         """Get all possible transitions across all items."""
         all_transitions = set()
@@ -127,6 +128,10 @@ class FJTransportProblem(FJProblem):
                 # Only add human transport option if humans are present
                 if self.resources.get('human', []):
                     self.zT[i, trans, "human"] = cp.boolvar(name=f"T_{i}_{trans}_human")
+                
+                # Only add robot transport option if robots are present
+                if self.resources.get('robot', []):
+                    self.zT[i, trans, "robot"] = cp.boolvar(name=f"T_{i}_{trans}_robot")
                 
                 # Add variables for direct conveyor paths only
                 pairs = self._conv_pairs(trans)
@@ -243,6 +248,9 @@ class FJTransportProblem(FJProblem):
                     if (i, trans, "human") in self.zT:
                         transport_time += self.zT[i, trans, "human"] * self.t_hum
                     
+                    if (i, trans, "robot") in self.zT:
+                        transport_time += self.zT[i, trans, "robot"] * self.t_robot
+                    
                     # Add direct conveyor time
                     pairs = self._conv_pairs(trans)
                     for m1, m2 in pairs:
@@ -250,11 +258,15 @@ class FJTransportProblem(FJProblem):
                         if key in self.zT:
                             transport_time += self.zT[key] * self.t_conv
                     
+                    # Exactly one transport mode must be chosen
+                    transport_options = []
                     if (i, trans, "human") in self.zT:
-                        self.m += self.zT[i, trans, "human"] + sum(opts) == 1
-                    else:
-                        # No human transport available, must use conveyor
-                        self.m += sum(opts) == 1
+                        transport_options.append(self.zT[i, trans, "human"])
+                    if (i, trans, "robot") in self.zT:
+                        transport_options.append(self.zT[i, trans, "robot"])
+                    transport_options.extend(opts)
+                    
+                    self.m += sum(transport_options) == 1
                     
                     self.m += self.E_T[i, trans] == self.S_T[i, trans] + transport_time
 
@@ -344,6 +356,24 @@ class FJTransportProblem(FJProblem):
             if starts_h:
                 self.m += cp.Cumulative(starts_h, durs_h, ends_h, demands_h, capacity=1)
 
+        # Capacity: robot (robot transports only) ----------
+        # Only apply robot capacity constraints if robots are present
+        if self.resources.get('robot', []):
+            starts_r, durs_r, ends_r, demands_r = [], [], [], []
+            for i in self.I:
+                # robot transports only
+                all_transitions = self.get_all_transitions()
+                for trans in all_transitions:
+                    if (i, trans, "robot") in self.zT:
+                        zR = self.zT[i, trans, "robot"]
+                        starts_r.append(self.S_T[i, trans])
+                        durs_r.append(self.t_robot * zR)
+                        ends_r.append(self.S_T[i, trans] + self.t_robot * zR)
+                        demands_r.append(zR)
+
+            if starts_r:
+                self.m += cp.Cumulative(starts_r, durs_r, ends_r, demands_r, capacity=1)
+
         # ---------- Capacity: conveyors (per physical link) ----------
         from collections import defaultdict
         per_conv = defaultdict(list)  # (m1,m2) -> list of (S_T, zConv)
@@ -388,112 +418,112 @@ class FJTransportProblem(FJProblem):
 
         #   4) Human lex ordering: if two items both pick Human for an op, order by item id.
         # """
-        #
+        pass
         # -------- helpers --------
-        def or_all(lits):
-            """OR over a list of Bool expressions/vars; returns None if empty."""
-            lit = None
-            for v in lits:
-                if v is None:
-                    continue
-                lit = v if lit is None else (lit | v)
-            return lit
-
-        # Map machine id -> (type, subtype)
-        id2type, id2sub = {}, {}
-        for typ, lst in self.resources.items():
-            if typ == 'human':
-                continue
-            for mid, sub in lst:
-                id2type[mid] = typ
-                id2sub[mid] = sub
-
-        # For each op, group machines by identical (type,subtype) for that op
-        def identical_machine_groups_for_op(op):
-            groups = {}
-            for m in self.M_of.get(op, []):
-                key = (id2type.get(m, None), id2sub.get(m, None))
-                groups.setdefault(key, []).append(m)
-            return [sorted(v) for v in groups.values() if len(v) >= 2]
-
-        # y[i,op,m] = 1 iff (i,op) uses machine m (human or arm)
-        y = {}
-        for i in self.I:
-            for op in self.OPS:
-                if not self.z.get((i, op), 0):
-                    continue
-                for m in self.M_of[op]:
-                    lit = or_all([self.x_h.get((i, op, m), None),
-                                  self.x_a.get((i, op, m), None)])
-                    if lit is not None:
-                        y[(i, op, m)] = lit
-
-        # -------- (1) Lex order between items of the same class --------
-        # Group items by their type (FLASHLIGHT_CLIPPED, FLASHLIGHT_SCREWS, etc.)
-        classes = {}
-        for i in self.I:
-            classes.setdefault(self.items_to_build[i], []).append(i)
-
-        for items in classes.values():
-            items = sorted(items)
-            if len(items) < 2:
-                continue
-            
-            # Get the route for this item type using the new system
-            item_type = self.items_to_build[items[0]]
-            from utility.item_definitions import get_item_definition
-            item_def = get_item_definition(item_type)
-            if item_def:
-                route = item_def.get_full_route()
-            else:
-                # Fallback to old system
-                route = self.OPS_i[items[0]]
-            
-            for a, b in zip(items[:-1], items[1:]):
-                # Lex on start times along the class route
-                eq_prefix = None
-                for j, op in enumerate(route):
-                    if op not in self.OPS_i[a] or op not in self.OPS_i[b]:
-                        continue  # Skip operations not present for this item
-                    if j == 0:
-                        # S[a,op] <= S[b,op]
-                        self.m += (self.S[a, op] <= self.S[b, op])
-                    else:
-                        # if all previous equal, enforce S[a,op] <= S[b,op]
-                        prev_op = route[j - 1]
-                        if prev_op in self.OPS_i[a] and prev_op in self.OPS_i[b]:
-                            cond = (self.S[a, prev_op] == self.S[b, prev_op]) if eq_prefix is None else (
-                                        eq_prefix & (self.S[a, prev_op] == self.S[b, prev_op]))
-                            eq_prefix = cond
-                            self.m += ((~cond) | (self.S[a, op] <= self.S[b, op]))
-
-        # -------- (2) Machine activation ordering within identical groups --------
-        # For each op, and each identical (type,subtype) group: if lane m2 used, lane m1 (m1<m2) must be used
-        for op in self.OPS:
-            for group in identical_machine_groups_for_op(op):
-                for m1, m2 in zip(group[:-1], group[1:]):
-                    u1 = or_all([y.get((i, op, m1), None) for i in self.I])
-                    u2 = or_all([y.get((i, op, m2), None) for i in self.I])
-                    if u1 is not None and u2 is not None:
-                        self.m += (u2 <= u1)
-
-        # -------- (4) Human lex ordering per op --------
-        # If two items both pick Human for an op (on any lane), order starts by id
-        for op in self.OPS:
-            for items_in_class in classes.values():
-                items_op = [i for i in sorted(items_in_class) if self.z.get((i, op), 0) == 1]
-                if len(items_op) < 2:
-                    continue
-                # ha = OR_m x_h[i,op,m]
-                ha = {
-                    i: or_all([self.x_h.get((i, op, m), None) for m in self.M_of[op] if (i, op, m) in self.x_h])
-                    for i in items_op
-                }
-                for a, b in zip(items_op[:-1], items_op[1:]):
-                    if ha[a] is None or ha[b] is None:
-                        continue
-                    both_h = ha[a] & ha[b]
-                    self.m += ((~both_h) | (self.S[a, op] <= self.S[b, op]))
+        # def or_all(lits):
+        #     """OR over a list of Bool expressions/vars; returns None if empty."""
+        #     lit = None
+        #     for v in lits:
+        #         if v is None:
+        #             continue
+        #         lit = v if lit is None else (lit | v)
+        #     return lit
+        #
+        # # Map machine id -> (type, subtype)
+        # id2type, id2sub = {}, {}
+        # for typ, lst in self.resources.items():
+        #     if typ == 'human':
+        #         continue
+        #     for mid, sub in lst:
+        #         id2type[mid] = typ
+        #         id2sub[mid] = sub
+        #
+        # # For each op, group machines by identical (type,subtype) for that op
+        # def identical_machine_groups_for_op(op):
+        #     groups = {}
+        #     for m in self.M_of.get(op, []):
+        #         key = (id2type.get(m, None), id2sub.get(m, None))
+        #         groups.setdefault(key, []).append(m)
+        #     return [sorted(v) for v in groups.values() if len(v) >= 2]
+        #
+        # # y[i,op,m] = 1 iff (i,op) uses machine m (human or arm)
+        # y = {}
+        # for i in self.I:
+        #     for op in self.OPS:
+        #         if not self.z.get((i, op), 0):
+        #             continue
+        #         for m in self.M_of[op]:
+        #             lit = or_all([self.x_h.get((i, op, m), None),
+        #                           self.x_a.get((i, op, m), None)])
+        #             if lit is not None:
+        #                 y[(i, op, m)] = lit
+        #
+        # # -------- (1) Lex order between items of the same class --------
+        # # Group items by their type (FLASHLIGHT_CLIPPED, FLASHLIGHT_SCREWS, etc.)
+        # classes = {}
+        # for i in self.I:
+        #     classes.setdefault(self.items_to_build[i], []).append(i)
+        #
+        # for items in classes.values():
+        #     items = sorted(items)
+        #     if len(items) < 2:
+        #         continue
+        #
+        #     # Get the route for this item type using the new system
+        #     item_type = self.items_to_build[items[0]]
+        #     from utility.item_definitions import get_item_definition
+        #     item_def = get_item_definition(item_type)
+        #     if item_def:
+        #         route = item_def.get_full_route()
+        #     else:
+        #         # Fallback to old system
+        #         route = self.OPS_i[items[0]]
+        #
+        #     for a, b in zip(items[:-1], items[1:]):
+        #         # Lex on start times along the class route
+        #         eq_prefix = None
+        #         for j, op in enumerate(route):
+        #             if op not in self.OPS_i[a] or op not in self.OPS_i[b]:
+        #                 continue  # Skip operations not present for this item
+        #             if j == 0:
+        #                 # S[a,op] <= S[b,op]
+        #                 self.m += (self.S[a, op] <= self.S[b, op])
+        #             else:
+        #                 # if all previous equal, enforce S[a,op] <= S[b,op]
+        #                 prev_op = route[j - 1]
+        #                 if prev_op in self.OPS_i[a] and prev_op in self.OPS_i[b]:
+        #                     cond = (self.S[a, prev_op] == self.S[b, prev_op]) if eq_prefix is None else (
+        #                                 eq_prefix & (self.S[a, prev_op] == self.S[b, prev_op]))
+        #                     eq_prefix = cond
+        #                     self.m += ((~cond) | (self.S[a, op] <= self.S[b, op]))
+        #
+        # # -------- (2) Machine activation ordering within identical groups --------
+        # # For each op, and each identical (type,subtype) group: if lane m2 used, lane m1 (m1<m2) must be used
+        # for op in self.OPS:
+        #     for group in identical_machine_groups_for_op(op):
+        #         for m1, m2 in zip(group[:-1], group[1:]):
+        #             u1 = or_all([y.get((i, op, m1), None) for i in self.I])
+        #             u2 = or_all([y.get((i, op, m2), None) for i in self.I])
+        #             if u1 is not None and u2 is not None:
+        #                 self.m += (u2 <= u1)
+        #
+        # # -------- (4) Human lex ordering per op --------
+        # # If two items both pick Human for an op (on any lane), order starts by id
+        # for op in self.OPS:
+        #     for items_in_class in classes.values():
+        #         items_op = [i for i in sorted(items_in_class) if self.z.get((i, op), 0) == 1]
+        #         if len(items_op) < 2:
+        #             continue
+        #         # ha = OR_m x_h[i,op,m]
+        #         ha = {
+        #             i: or_all([self.x_h.get((i, op, m), None) for m in self.M_of[op] if (i, op, m) in self.x_h])
+        #             for i in items_op
+        #         }
+        #         for a, b in zip(items_op[:-1], items_op[1:]):
+        #             if ha[a] is None or ha[b] is None:
+        #                 continue
+        #             both_h = ha[a] & ha[b]
+        #             self.m += ((~both_h) | (self.S[a, op] <= self.S[b, op]))
 
     def make_gantt(self, folder=None,html=False):
         """
@@ -573,13 +603,16 @@ class FJTransportProblem(FJProblem):
             if (i, trans, "human") in self.zT and self.zT[i, trans, "human"].value() == 1:
                 return "Human"  # human transport is solid
             
+            if (i, trans, "robot") in self.zT and self.zT[i, trans, "robot"].value() == 1:
+                return "Robot"  # robot transport is solid
+            
             # Check direct conveyor paths only
             pairs = self._conv_pairs(trans)
             for m1, m2 in pairs:
                 key = (i, trans, ("conv", m1, m2))
                 if key in self.zT and self.zT[key].value() == 1:
                     return conv_label(m1, m2)
-            return None
+            return "Unknown"  # Return a default instead of None
 
         # Label normalization to avoid accidental new categories (spaces, unicode)
         def norm_label(s: str) -> str:
@@ -633,9 +666,9 @@ class FJTransportProblem(FJProblem):
                     continue
                 S, E = int(Sv), int(Ev)
                 res = resource_for_transport(i, trans)
-                if res is None:
+                if res is None or res == "Unknown":
                     continue
-                pattern = "x" if res == "Human" else "dot"
+                pattern = "x" if res == "Human" else "o" if res == "Robot" else "dot"
                 rows.append({
                     "Item": str(i), "Op": f"T_{trans}",
                     "Task": f"Item {i} – Transport {trans}",
@@ -658,6 +691,7 @@ class FJTransportProblem(FJProblem):
             # 5 GRIP WS
             # 6 CONV KB (KIT -> ASM)
             # 7 Human
+            # 8 Robot
             if resource.startswith("PACK"):
                 return 1
             if ttype == "BP":
@@ -672,12 +706,20 @@ class FJTransportProblem(FJProblem):
                 return 6
             if resource == "Human":
                 return 10
+            if resource == "Robot":
+                return 8
             if resource.startswith("KIT"):
                 return 7
+            if resource == "Unknown":
+                return 11
             return 9
 
         # Normalize & rank
         df["Resource"] = df["Resource"].map(norm_label)
+        # Filter out rows with NaN or None resources
+        df = df.dropna(subset=["Resource"])
+        df = df[df["Resource"].notna()]
+        df = df[df["Resource"] != ""]
         df["LaneRank"] = df.apply(lambda r: lane_rank(r["Resource"], r["TransType"]), axis=1)
 
         # unique resources ordered by (rank, name)
@@ -689,9 +731,13 @@ class FJTransportProblem(FJProblem):
             if res not in seen:
                 order.append(res)
                 seen.add(res)
-        # force Human bottom
-        order = [r for r in order if r != "Human"] + (["Human"] if "Human" in order else [])
-
+        # force Human bottom, Robot above Human
+        order_bf = [r for r in order if r not in ["Human", "Robot"]]
+        if "Robot" in order:
+            order_bf.append("Robot")
+        if "Human" in order:
+            order_bf.append("Human")
+        order = order_bf
         # lock categorical dtype
         from pandas.api.types import CategoricalDtype
         lane_dtype = CategoricalDtype(categories=order, ordered=True)
@@ -703,7 +749,7 @@ class FJTransportProblem(FJProblem):
             raise ValueError(f"Unknown lane labels not in category order: {stray}")
 
         # patterns
-        pattern_map = {"solid": "", "stripe": "/", "x": "x", "dot": "."}
+        pattern_map = {"solid": "", "stripe": "/", "x": ".", "o": ".", "dot": "."}
         df["PatternShape"] = df["Pattern"].map(pattern_map).fillna("")
 
         palette = q.Plotly
@@ -917,6 +963,8 @@ class FJTransportProblem(FJProblem):
         for typ, lst in self.resources.items():
             if typ == 'human':
                 continue
+            if typ == 'robot':
+                continue
             for mid, sub in lst:
                 id2type[mid] = typ
                 id2sub[mid] = sub
@@ -954,6 +1002,7 @@ class FJTransportProblem(FJProblem):
             "packing": "rgba(235,87,87,1)",
             "neutral": "rgba(160,160,160,1)",
             "human": "rgba(200,200,200,1)",
+            "robot": "rgba(150,150,150,1)",
         }
 
         max_rows = max(1, *(len(col_ids) for _, col_ids in columns))
@@ -1013,25 +1062,63 @@ class FJTransportProblem(FJProblem):
             # update x offset for next group
             x_offset += x_gap + group_gap
 
-        # --- Human block ---------------------------------------------------------
+        # --- Human and Robot blocks ---------------------------------------------------------
         human_ids = list(self.resources.get('human', []))
-        if human_ids:
-            x_center = (x_offset - group_gap) / 2.0
-            y_h = start_y + 2.0
+        robot_ids = list(self.resources.get('robot', []))
+        
+        if human_ids or robot_ids:
+            y_h = start_y + 1.8  # A little bit lower
             hw, hh = 1.2, 0.5
-            shapes.append(dict(
-                type="rect", xref="x", yref="y",
-                x0=x_center - hw / 2, x1=x_center + hw / 2,
-                y0=y_h - hh / 2, y1=y_h + hh / 2,
-                line=dict(color="white", width=2), fillcolor=color_map["human"]
-            ))
-            label = "human" if len(human_ids) == 1 else f"{len(human_ids)} humans"
-            annos.append(dict(
-                x=x_center, y=y_h, xref="x", yref="y",
-                text=f"<b>{label}</b>", showarrow=False,
-                font=dict(size=12, color="#000000"),
-                xanchor="center", yanchor="middle"
-            ))
+            
+            # Calculate horizontal positions for human and robot
+            # Center them over the build section (middle column, index 1)
+            # Build section is at position: x_gap + group_gap
+            build_x_center = x_gap + group_gap  # Center of build section
+            
+            if human_ids and robot_ids:
+                # Both present - place side by side, centered over build section
+                x_robot = build_x_center - 0.8  # Left of build center
+                x_human = build_x_center + 0.8  # Right of build center
+            elif human_ids:
+                # Only human - center it over build section
+                x_human = build_x_center
+                x_robot = None
+            else:
+                # Only robot - center it over build section
+                x_robot = build_x_center
+                x_human = None
+            
+            # Human block
+            if human_ids and x_human is not None:
+                shapes.append(dict(
+                    type="rect", xref="x", yref="y",
+                    x0=x_human - hw / 2, x1=x_human + hw / 2,
+                    y0=y_h - hh / 2, y1=y_h + hh / 2,
+                    line=dict(color="white", width=2), fillcolor=color_map["human"]
+                ))
+                label = "human" if len(human_ids) == 1 else f"{len(human_ids)} humans"
+                annos.append(dict(
+                    x=x_human, y=y_h, xref="x", yref="y",
+                    text=f"<b>{label}</b>", showarrow=False,
+                    font=dict(size=12, color="#000000"),
+                    xanchor="center", yanchor="middle"
+                ))
+            
+            # Robot block
+            if robot_ids and x_robot is not None:
+                shapes.append(dict(
+                    type="rect", xref="x", yref="y",
+                    x0=x_robot - hw / 2, x1=x_robot + hw / 2,
+                    y0=y_h - hh / 2, y1=y_h + hh / 2,
+                    line=dict(color="white", width=2), fillcolor=color_map["human"]  # Same grey as human
+                ))
+                label = "robot" if len(robot_ids) == 1 else f"{len(robot_ids)} robots"
+                annos.append(dict(
+                    x=x_robot, y=y_h, xref="x", yref="y",
+                    text=f"<b>{label}</b>", showarrow=False,
+                    font=dict(size=12, color="#000000"),
+                    xanchor="center", yanchor="middle"
+                ))
 
         # --- conveyors -----------------------------------------------------------
         for entry in self.connected_via_conveyor:
@@ -1083,7 +1170,7 @@ class FJTransportProblem(FJProblem):
         # --- figure --------------------------------------------------------------
         x_min = -x_gap
         x_max = x_offset
-        y_top_extra = 2.6 if human_ids else 1.4
+        y_top_extra = 2.5 if (human_ids or robot_ids) else 1.4
         y_min = -start_y - 1.4
         y_max = start_y + y_top_extra
 

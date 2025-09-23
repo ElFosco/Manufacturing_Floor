@@ -18,6 +18,11 @@ HUMAN_JOBS_TIME = {
     "T":   5
 }
 
+ROBOT_JOBS_TIME = {
+    "T":   8
+}
+
+
 WS_KITTING = {
     'type': KIT,
     'subtype': None,
@@ -53,5 +58,6 @@ TYPE_TO_SUBTYPES = {
         "KIT": [],
         "ASSEMBLY": ["GRIP", "GRIP & SCREW"],
         "PALLETING": [],
-        "HUMAN" : []
+        "HUMAN" : [],
+        "ROBOT" : []
     }

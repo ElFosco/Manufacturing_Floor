@@ -56,6 +56,11 @@ class FJProblem(ABC):
         self.resources['human'].append(id)
         return id
 
+    def add_robot(self):
+        id = self.generate_id_resource()
+        self.resources['robot'].append(id)
+        return id
+
 
     def add_items_to_build(self,type,qty):
         for _ in range(qty):
@@ -63,8 +68,11 @@ class FJProblem(ABC):
             self.items_to_build[id_item] = type
 
     def set_dur_hum(self,dur_hum):
-        self.dur_hum = dur_hum
+        self.dur_hum = dur_hum.copy()
         self.t_hum = dur_hum['T']
+
+    def set_dur_robot(self, dur_robot):
+        self.t_robot = dur_robot['T']
 
     def route_for_item(self,item):
         """Get the operation route for an item using generalized item definitions."""

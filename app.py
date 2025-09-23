@@ -3,7 +3,7 @@ import webbrowser
 
 from utility.jobshop_model_transport import FJTransportProblem
 from utility.costant import TYPE_TO_SUBTYPES, WS_KITTING, WS_BUILDING_1, WS_BUILDING_2, WS_PALLETTING, HUMAN_JOBS_TIME, \
-    FLASHLIGHT_CLIPPED, FLASHLIGHT_SCREWS
+    FLASHLIGHT_CLIPPED, FLASHLIGHT_SCREWS, ROBOT_JOBS_TIME
 from utility.item_definitions import get_all_item_names, get_item_definition
 
 import tkinter as tk
@@ -94,7 +94,7 @@ def make_section(parent, title, img_path=None, max_w=800, max_h=400, border=True
 # =========================
 # Helpers for solution log
 # =========================
-def build_config_summary(prob: FJTransportProblem) -> str:
+def build_config_data(prob: FJTransportProblem) -> tuple:
     try:
         num_items = len(getattr(prob, "items_to_build", {}) or {})
         num_conns = len(getattr(prob, "connected_via_conveyor", []) or [])
@@ -108,9 +108,10 @@ def build_config_summary(prob: FJTransportProblem) -> str:
         asms = count_type(ASM)
         packs = count_type(PACK)
         humans = len(res.get('human', []) or [])
-        return f"Items:{num_items} | KIT:{kits} ASM:{asms} PALLET:{packs} Human:{humans} | Belts:{num_conns}"
+        robots = len(res.get('robot', []) or [])
+        return (num_items, kits, asms, packs, humans, robots, num_conns)
     except Exception:
-        return "(summary unavailable)"
+        return (0, 0, 0, 0, 0, 0, 0)
 
 def reset_product_selection():
     """Clear items to build and reset the totals table in the UI if present."""
@@ -145,7 +146,7 @@ def resolve_ws_constant_name(type_str: str, subtype_str: str | None):
             return "WS_BUILDING_1"
         if subtype_str == "GRIP & SCREW":
             return "WS_BUILDING_2"
-    return None  # HUMAN or invalid
+    return None  # HUMAN, ROBOT or invalid
 
 CONST_MAP = {
     "WS_KITTING": WS_KITTING,
@@ -280,7 +281,7 @@ def bind_topology_controls(parent_frame, topology_img_label, img_max_w=800, img_
             ws_registry.clear()
             from utility.costant import KIT, ASM, PACK
             for typ, lst in getattr(problem, "resources", {}).items():
-                if typ == 'human':
+                if typ in ['human', 'robot']:
                     continue
                 if typ == KIT:
                     for mid, sub in lst:
@@ -315,6 +316,18 @@ def bind_topology_controls(parent_frame, topology_img_label, img_max_w=800, img_
                 preview_topology()
             except Exception as e:
                 messagebox.showerror("Problem error", f"Failed to add human: {e}")
+            return
+
+        if t == "ROBOT":
+            try:
+                reset_product_selection()
+                problem.add_robot()
+                problem.set_dur_robot(ROBOT_JOBS_TIME)  # Robot transport time
+                ensure_dir_for("./images/topology.jpg")
+                problem.make_ws_topology(location="./images/topology.jpg")
+                preview_topology()
+            except Exception as e:
+                messagebox.showerror("Problem error", f"Failed to add robot: {e}")
             return
 
         const_name = resolve_ws_constant_name(t, st)
@@ -534,6 +547,8 @@ def bind_premade_topology(parent_frame, topology_img_label, img_max_w=800, img_m
         problem = FJTransportProblem(symmetry_breaking=True)
         problem.add_human()
         problem.set_dur_hum(HUMAN_JOBS_TIME)
+        # problem.add_robot()
+        # problem.set_dur_robot(ROBOT_JOBS_TIME)
 
         id_kit = problem.add_workstation(WS_KITTING)
 
@@ -551,6 +566,8 @@ def bind_premade_topology(parent_frame, topology_img_label, img_max_w=800, img_m
         problem = FJTransportProblem(symmetry_breaking=True)
         problem.add_human()
         problem.set_dur_hum(HUMAN_JOBS_TIME)
+        # problem.add_robot()
+        # problem.set_dur_robot(ROBOT_JOBS_TIME)
 
         id_kit_1 = problem.add_workstation(WS_KITTING)
         id_kit_2 = problem.add_workstation(WS_KITTING)
@@ -572,6 +589,8 @@ def bind_premade_topology(parent_frame, topology_img_label, img_max_w=800, img_m
         problem = FJTransportProblem(symmetry_breaking=True)
         problem.add_human()
         problem.set_dur_hum(HUMAN_JOBS_TIME)
+        # problem.add_robot()
+        # problem.set_dur_robot(ROBOT_JOBS_TIME)
 
         id_kit1 = problem.add_workstation(WS_KITTING)
         id_kit2 = problem.add_workstation(WS_KITTING)
@@ -612,6 +631,10 @@ def bind_premade_topology(parent_frame, topology_img_label, img_max_w=800, img_m
         try:
             global problem
             problem = FJTransportProblem(symmetry_breaking=True)
+            problem.add_human()
+            problem.set_dur_hum(HUMAN_JOBS_TIME)
+            problem.add_robot()
+            problem.set_dur_robot(ROBOT_JOBS_TIME)
             reset_product_selection()
             ensure_dir_for("./images/topology.jpg")
             problem.make_ws_topology(location="./images/topology.jpg")
@@ -802,9 +825,9 @@ def bind_solving_controls(parent_frame, solution_img_label, img_max_w=800, img_m
                     except Exception:
                         ms_val = None
                 ms_text = str(ms_val) if ms_val is not None else "-"
-                cfg = build_config_summary(active_prob)
+                items, kits, asms, packs, humans, robots, belts = build_config_data(active_prob)
                 if solutions_table is not None:
-                    solutions_table.insert("", "end", values=(ms_text, cfg))
+                    solutions_table.insert("", "end", values=(ms_text, items, kits, asms, packs, humans, robots, belts))
             except Exception:
                 pass
 
@@ -869,7 +892,7 @@ def main():
     # Three columns (add right-most 'Solutions' column)
     container.columnconfigure(0, weight=1)
     container.columnconfigure(1, weight=3, minsize=520)
-    container.columnconfigure(2, weight=0, minsize=200)
+    container.columnconfigure(2, weight=0, minsize=350)
     # Three rows: 0 = main two-column area, 1 = left-half Solving, 2 = full-width Solution (small)
     container.rowconfigure(0, weight=1)
     container.rowconfigure(1, weight=0)
@@ -941,13 +964,13 @@ def main():
     solutions_section, solutions_inner, _ = make_section(solutions_frame, "Solutions", border=True)
     solutions_section.pack(expand=True, fill="both")
 
-    # Solutions list (Makespan, Config summary)
+    # Solutions list (separate columns for each info)
     global solutions_table
-    cols = ("MAKESPAN", "CONFIG")
+    cols = ("SPAN", "ITEMS", "KIT", "ASM", "PACK", "HUMAN", "ROBOT", "BELTS")
     solutions_table = ttk.Treeview(solutions_inner, columns=cols, show="headings", height=12)
-    for head, w in [("MAKESPAN", 100), ("CONFIG", 260)]:
+    for head, w in [("SPAN", 50), ("ITEMS", 40), ("KIT", 30), ("ASM", 30), ("PACK", 30), ("HUMAN", 40), ("ROBOT", 40), ("BELTS", 40)]:
         solutions_table.heading(head, text=head)
-        solutions_table.column(head, width=w, anchor="w", stretch=True)
+        solutions_table.column(head, width=w, anchor="center", stretch=False)
     solutions_table.pack(expand=True, fill="both")
 
     root.minsize(1100, 750)
