@@ -7,6 +7,8 @@ import pandas as pd
 import plotly.express as px
 from numpy.ma.core import shape
 import time
+
+from cpmpy import SolverLookup
 from utility.costant import K1, B1, B2, K2, P, KB, BP, B12, KIT, FLASHLIGHT_CLIPPED, ASM, \
     FLASHLIGHT_SCREWS, PACK
 from utility.item_definitions import get_item_definition, get_all_item_names
@@ -66,6 +68,20 @@ class FJProblem(ABC):
         for _ in range(qty):
             id_item = self.generate_id_item()
             self.items_to_build[id_item] = type
+
+    def remove_items_from_build(self, type, qty):
+        """Remove items of a specific type from the items_to_build dictionary."""
+        # Find items of the specified type
+        items_to_remove = []
+        for item_id, item_type in self.items_to_build.items():
+            if item_type == type and len(items_to_remove) < qty:
+                items_to_remove.append(item_id)
+        
+        # Remove the items
+        for item_id in items_to_remove:
+            del self.items_to_build[item_id]
+        
+        return len(items_to_remove)  # Return actual number removed
 
     def set_dur_hum(self,dur_hum):
         self.dur_hum = dur_hum.copy()
@@ -142,7 +158,7 @@ class FJProblem(ABC):
                 self.OPS_on_WS.setdefault(m, set()).add(op)
 
         # A safe UB on makespan
-        self.horizon = int(1e3)
+        self.ub = int(1e3)
 
     def model_problem(self):
         self.define_parameters()
@@ -152,18 +168,24 @@ class FJProblem(ABC):
             self.define_symmetry_breaking()
         self.optimize()
 
-    def solve(self,solver='ortools'):
+    def solve(self, solver='ortools', params=None,timeout=None):
         start = time.time()
-        if self.m.solve(solver=solver):
-            end = time.time()
-            elapsed = end - start
-            print('Solution found with makespan:', self.makespan.value())
-            print(f"Computational time: {elapsed:.3f} seconds")
+
+        solver = SolverLookup.get(solver, self.m)
+        if params is not None:
+            solved = solver.solve(time_limit=timeout,**params)
         else:
-            end = time.time()
-            elapsed = end - start
+            solved = solver.solve(time_limit=timeout)
+
+        end = time.time()
+        elapsed = end - start
+
+        if solved:
+            print('Solution found with makespan:', self.makespan.value())
+        else:
             print('No solution found')
-            print(f"Computational time: {elapsed:.3f} seconds")
+
+        print(f"Computational time: {elapsed:.3f} seconds")
 
 
 
@@ -448,9 +470,9 @@ class FJNoTransportProblem(FJProblem):
                     if self._arm_allowed(op, m):
                         self.x_a[i, op, m] = cp.boolvar(name=f"xA_{i}_{op}_{m}")
 
-        self.S = {(i, op): cp.intvar(0, self.horizon, name=f"S_{i}_{op}") for i in self.I for op in self.OPS}
-        self.E = {(i, op): cp.intvar(0, self.horizon, name=f"E_{i}_{op}") for i in self.I for op in self.OPS}
-        self.makespan = cp.intvar(0, self.horizon, name="Makespan")
+        self.S = {(i, op): cp.intvar(0, self.ub, name=f"S_{i}_{op}") for i in self.I for op in self.OPS}
+        self.E = {(i, op): cp.intvar(0, self.ub, name=f"E_{i}_{op}") for i in self.I for op in self.OPS}
+        self.makespan = cp.intvar(0, self.ub, name="Makespan")
 
         # Build map machine -> ops it can run
         self.OP_flag = {}

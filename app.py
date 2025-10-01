@@ -58,7 +58,7 @@ def animate_gif(label, frames, delay=100):
         label._anim_job = label.after(delay, update, (idx + 1) % len(frames))
     update()
 
-def make_section(parent, title, img_path=None, max_w=800, max_h=400, border=True):
+def make_section(parent, title, img_path=None, max_w=1000, max_h=400, border=True):
     """
     Returns (outer_frame, inner_frame, image_label_or_None).
     Caller decides pack/grid for outer to avoid mixing geometry managers.
@@ -113,8 +113,10 @@ def build_config_data(prob: FJTransportProblem) -> tuple:
     except Exception:
         return (0, 0, 0, 0, 0, 0, 0)
 
-def reset_product_selection():
-    """Clear items to build and reset the totals table in the UI if present."""
+
+
+def clear_all_items():
+    """Clear all items from both the problem and the UI table."""
     try:
         # Reset model items
         if hasattr(problem, "items_to_build"):
@@ -132,6 +134,26 @@ def reset_product_selection():
                     pass
     except Exception:
         pass
+
+def commit_items_to_model():
+    """Commit current UI item quantities to the model."""
+    try:
+        global product_totals, product_items_map
+        if product_totals is not None and product_items_map is not None:
+            # Clear existing items from model
+            if hasattr(problem, "items_to_build"):
+                problem.items_to_build = {}
+                if hasattr(problem, "max_id_item"):
+                    problem.max_id_item = 0
+            
+            # Add items from UI totals to model
+            for name, qty in product_totals.items():
+                if qty > 0:
+                    problem.add_items_to_build(product_items_map[name], qty)
+    except Exception as e:
+        messagebox.showerror("Commit error", f"Failed to commit items to model: {e}")
+        return False
+    return True
 
 # =====================================
 # Workstation mapping / validation
@@ -180,7 +202,7 @@ def is_allowed_connection(role_from: str, role_to: str) -> bool:
 # =====================================
 # Topology Creation controls (left-top image refresh supported)
 # =====================================
-def bind_topology_controls(parent_frame, topology_img_label, img_max_w=800, img_max_h=400):
+def bind_topology_controls(parent_frame, topology_img_label, img_max_w=1000, img_max_h=400):
     """
     parent_frame: inner frame of "Topology Creation"
     topology_img_label: the label showing the 'Workstation Topology' image/GIF (left-top)
@@ -308,7 +330,6 @@ def bind_topology_controls(parent_frame, topology_img_label, img_max_w=800, img_
 
         if t == "HUMAN":
             try:
-                reset_product_selection()
                 problem.add_human()
                 problem.set_dur_hum(HUMAN_JOBS_TIME)
                 ensure_dir_for("./images/topology.jpg")
@@ -320,7 +341,6 @@ def bind_topology_controls(parent_frame, topology_img_label, img_max_w=800, img_
 
         if t == "ROBOT":
             try:
-                reset_product_selection()
                 problem.add_robot()
                 problem.set_dur_robot(ROBOT_JOBS_TIME)  # Robot transport time
                 ensure_dir_for("./images/topology.jpg")
@@ -341,7 +361,6 @@ def bind_topology_controls(parent_frame, topology_img_label, img_max_w=800, img_
             return
 
         try:
-            reset_product_selection()
             new_id = problem.add_workstation(const_value)
             role = CONST_TO_ROLE[const_name]
             ws_registry.append({"id": new_id, "role": role})
@@ -408,7 +427,6 @@ def bind_topology_controls(parent_frame, topology_img_label, img_max_w=800, img_
             return
 
         try:
-            reset_product_selection()
             problem.add_transport(id_from, id_to)
             ensure_dir_for("./images/topology.jpg")
             problem.make_ws_topology(location="./images/topology.jpg")
@@ -474,7 +492,7 @@ def apply_layout_3(prob: FJTransportProblem):
     prob.add_transport(id_grip, id_gs)
     prob.add_transport(id_gs, id_pal)
 
-def bind_premade_topology(parent_frame, topology_img_label, img_max_w=800, img_max_h=400):
+def bind_premade_topology(parent_frame, topology_img_label, img_max_w=1000, img_max_h=400):
     """
     Buttons that apply a predefined layout and refresh the left-top preview.
     Uses GRID consistently to avoid pack/grid conflicts.
@@ -528,7 +546,6 @@ def bind_premade_topology(parent_frame, topology_img_label, img_max_w=800, img_m
 
     def run_layout(apply_fn):
         try:
-            reset_product_selection()
             apply_fn()  # creates new problem and builds it
             ensure_dir_for("./images/topology.jpg")
             problem.make_ws_topology(location="./images/topology.jpg")
@@ -635,7 +652,6 @@ def bind_premade_topology(parent_frame, topology_img_label, img_max_w=800, img_m
             problem.set_dur_hum(HUMAN_JOBS_TIME)
             problem.add_robot()
             problem.set_dur_robot(ROBOT_JOBS_TIME)
-            reset_product_selection()
             ensure_dir_for("./images/topology.jpg")
             problem.make_ws_topology(location="./images/topology.jpg")
             refresh_preview()
@@ -691,7 +707,10 @@ def bind_product_selection(parent_frame):
     qty_sp.grid(row=0, column=3, padx=5, pady=5, sticky="w")
 
     add_item_btn = ttk.Button(row, text="Add Items")
-    add_item_btn.grid(row=0, column=4, padx=16, pady=5, sticky="w")
+    add_item_btn.grid(row=0, column=4, padx=8, pady=5, sticky="w")
+    
+    remove_item_btn = ttk.Button(row, text="Remove Items")
+    remove_item_btn.grid(row=0, column=5, padx=8, pady=5, sticky="w")
 
     table = ttk.Treeview(parent_frame, columns=("item", "total"), show="headings", height=2)
     table.pack(fill="both", expand=True, padx=8, pady=(8, 0))
@@ -726,18 +745,42 @@ def bind_product_selection(parent_frame):
             return
 
         allowed = min(qty, max_per_item - current)
-        try:
-            problem.add_items_to_build(ITEMS_MAP[name], allowed)
-        except Exception as e:
-            messagebox.showerror("Problem error", f"Failed to add items: {e}")
-            return
-
+        
+        # Only update UI table - don't add to model yet
         totals[name] += allowed
         table.item(name, values=(name, totals[name]))
         if allowed < qty:
             messagebox.showinfo("Adjusted", f"Only {allowed} were added to stay within the limit of {max_per_item}.")
 
+    def remove_items():
+        name = item_var.get()
+        try:
+            qty = int(qty_var.get())
+        except ValueError:
+            messagebox.showwarning("Invalid quantity", "Please select a quantity between 1 and 6.")
+            return
+
+        if qty < 1 or qty > max_per_item:
+            messagebox.showwarning("Invalid quantity", f"Quantity must be between 1 and {max_per_item}.")
+            return
+
+        current = totals[name]
+        if current <= 0:
+            messagebox.showinfo("No items", f"No {name} items to remove.")
+            return
+
+        # Calculate how many we can actually remove
+        to_remove = min(qty, current)
+        
+        # Only update UI table - don't remove from model yet
+        totals[name] -= to_remove
+        table.item(name, values=(name, totals[name]))
+        
+        if to_remove < qty:
+            messagebox.showinfo("Adjusted", f"Only {to_remove} were removed (only {current} were available).")
+
     add_item_btn.configure(command=add_items)
+    remove_item_btn.configure(command=remove_items)
 
 def bind_solving_controls(parent_frame, solution_img_label, img_max_w=800, img_max_h=400):
     """
@@ -776,6 +819,10 @@ def bind_solving_controls(parent_frame, solution_img_label, img_max_w=800, img_m
 
     def run_solver():
         try:
+            # Commit items from UI to model before solving
+            if not commit_items_to_model():
+                return
+            
             # Solve current working model
             active_prob = problem
             active_prob.model_problem()
@@ -890,8 +937,8 @@ def main():
     container.pack(fill="both", expand=True)
 
     # Three columns (add right-most 'Solutions' column)
-    container.columnconfigure(0, weight=1)
-    container.columnconfigure(1, weight=3, minsize=520)
+    container.columnconfigure(0, weight=1, minsize=650)
+    container.columnconfigure(1, weight=5, minsize=520)  # Increased weight for wider topology frame
     container.columnconfigure(2, weight=0, minsize=350)
     # Three rows: 0 = main two-column area, 1 = left-half Solving, 2 = full-width Solution (small)
     container.rowconfigure(0, weight=1)
@@ -904,7 +951,7 @@ def main():
 
     # Top-left: starts with waiting.gif, later replaced with ./images/topology.jpg
     sec1, _inner1, topology_img_label = make_section(
-        left_frame, "Workstation Topology", "images/waiting.gif", 800, 400
+        left_frame, "Workstation Topology", "images/waiting.gif", 1200, 400
     )
     sec1.pack(side="top", expand=True, fill="both", pady=6)
 
@@ -922,12 +969,12 @@ def main():
     # Row 0: Topology Creation (buttons: Add Workstation / Add Conveyor Belt / items under this moved out)
     frame_topology_creation, topology_inner, _ = make_section(right_frame, "Topology Creation", border=True)
     frame_topology_creation.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
-    bind_topology_controls(topology_inner, topology_img_label, img_max_w=800, img_max_h=400)
+    bind_topology_controls(topology_inner, topology_img_label, img_max_w=1000, img_max_h=400)
 
     # Row 1: Pre-made topology (Layout 1/2/3) that rebuilds a new problem and refreshes left-top image
     frame_premade, premade_inner, _ = make_section(right_frame, "Pre-made topology", border=True)
     frame_premade.grid(row=1, column=0, sticky="nsew", padx=6, pady=6)
-    bind_premade_topology(premade_inner, topology_img_label, img_max_w=800, img_max_h=400)
+    bind_premade_topology(premade_inner, topology_img_label, img_max_w=1000, img_max_h=400)
 
     # Row 2: Product selection (totals-only table + add items)
     frame_products, products_inner, _ = make_section(right_frame, "Product selection", border=True)
