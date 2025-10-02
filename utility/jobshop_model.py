@@ -186,6 +186,7 @@ class FJProblem(ABC):
             print('No solution found')
 
         print(f"Computational time: {elapsed:.3f} seconds")
+        return solved,elapsed,solver.status().exitstatus
 
 
 

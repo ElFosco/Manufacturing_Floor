@@ -1686,6 +1686,10 @@ class FJTransportProblem(FJProblem):
             # Faster PNG: keep scale=1 (scale multiplies pixel count)
             fig.write_image(location, format="png", width=int(1600 * S), height=int(900 * S), scale=1)
         else:
+            fig.update_layout(
+                width=1400,  # pick something reasonable
+                height=600
+            )
             fig.show()
 
 
