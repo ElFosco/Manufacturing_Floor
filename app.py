@@ -1,10 +1,15 @@
 import os
 import webbrowser
+import uuid
+import shutil
+import threading
+from datetime import datetime
 
-from utility.jobshop_model_transport import FJTransportProblem
-from utility.costant import TYPE_TO_SUBTYPES, WS_KITTING, WS_BUILDING_1, WS_BUILDING_2, WS_PALLETTING, HUMAN_JOBS_TIME, \
+from utils.jobshop_model_transport import FJTransportProblem
+from utils.costant import TYPE_TO_SUBTYPES, WS_KITTING, WS_BUILDING_1, WS_BUILDING_2, WS_PALLETTING, HUMAN_JOBS_TIME, \
     FLASHLIGHT_CLIPPED, FLASHLIGHT_SCREWS, ROBOT_JOBS_TIME
-from utility.item_definitions import get_all_item_names, get_item_definition
+from utils.item_definitions import get_all_item_names, get_item_definition
+from utils.utility_classes import FWI
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -20,6 +25,172 @@ product_totals = None
 product_items_map = None
 product_max_per_item = 6
 update_ws_registry_hook = None
+
+# Solution storage system
+solutions_storage = {}  # Dictionary to store solution data with IDs
+solution_counter = 0  # Counter for generating unique IDs
+
+# =========================
+# Solution Storage System
+# =========================
+def generate_solution_id():
+    """Generate a unique solution ID"""
+    global solution_counter
+    solution_counter += 1
+    return f"{solution_counter:03d}"
+
+def store_solution_data(solution_id, makespan, resources, employees, robots, topology_path, solution_path):
+    """Store solution data with associated image paths"""
+    solutions_storage[solution_id] = {
+        'id': solution_id,
+        'makespan': makespan,
+        'resources': resources,
+        'employees': employees,
+        'robots': robots,
+        'topology_path': topology_path,
+        'solution_path': solution_path,
+        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+
+def save_solution_images(solution_id):
+    """Save topology and solution images with solution ID"""
+    # Create solutions directory if it doesn't exist
+    solutions_dir = "./solutions"
+    os.makedirs(solutions_dir, exist_ok=True)
+    
+    # Copy topology image
+    topology_src = "./images/topology.jpg"
+    topology_dst = f"{solutions_dir}/topology_{solution_id}.jpg"
+    if os.path.exists(topology_src):
+        shutil.copy2(topology_src, topology_dst)
+    
+    # Copy solution image
+    solution_src = "./images/sol.jpg"
+    solution_dst = f"{solutions_dir}/solution_{solution_id}.jpg"
+    if os.path.exists(solution_src):
+        shutil.copy2(solution_src, solution_dst)
+    
+    return topology_dst, solution_dst
+
+def show_solution_images(solution_id, topology_img_label, solution_img_label):
+    """Display topology and solution images for a given solution ID in existing frames"""
+    if solution_id not in solutions_storage:
+        messagebox.showerror("Error", f"Solution {solution_id} not found!")
+        return
+    
+    solution_data = solutions_storage[solution_id]
+    
+    # Load and display topology image in existing topology frame
+    try:
+        if os.path.exists(solution_data['topology_path']):
+            stop_gif(topology_img_label)
+            topology_img = Image.open(solution_data['topology_path'])
+            topology_img_label._pil_image = topology_img
+
+            def fit_topology_image(label, pil_image):
+                if pil_image is None:
+                    return
+                w = label.winfo_width()
+                h = label.winfo_height()
+                if w > 1 and h > 1:
+                    src_w, src_h = pil_image.size
+                    target_w = min(w, src_w)
+                    target_h = min(h, src_h)
+                    img_copy = pil_image.copy()
+                    img_copy.thumbnail((target_w, target_h), Image.LANCZOS)
+                    tk_img = ImageTk.PhotoImage(img_copy)
+                    label.configure(image=tk_img)
+                    label.image = tk_img
+
+            fit_topology_image(topology_img_label, topology_img)
+            topology_img_label.bind(
+                "<Configure>",
+                lambda e: fit_topology_image(
+                    topology_img_label, getattr(topology_img_label, "_pil_image", None)
+                )
+            )
+        else:
+            topology_img_label.configure(text="Topology image not found")
+    except Exception as e:
+        topology_img_label.configure(text=f"Error loading topology: {e}")
+    
+    # Load and display solution image in existing solution frame
+    try:
+        if os.path.exists(solution_data['solution_path']):
+            stop_gif(solution_img_label)
+            solution_img = Image.open(solution_data['solution_path'])
+            solution_img_label._pil_image = solution_img
+
+            def fit_solution_image(label, pil_image):
+                if pil_image is None:
+                    return
+                w = label.winfo_width()
+                h = label.winfo_height()
+                if w > 1 and h > 1:
+                    src_w, src_h = pil_image.size
+                    target_w = min(w, src_w)
+                    target_h = min(h, src_h)
+                    img_copy = pil_image.copy()
+                    img_copy.thumbnail((target_w, target_h), Image.LANCZOS)
+                    tk_img = ImageTk.PhotoImage(img_copy)
+                    label.configure(image=tk_img)
+                    label.image = tk_img
+
+            fit_solution_image(solution_img_label, solution_img)
+            solution_img_label.bind(
+                "<Configure>",
+                lambda e: fit_solution_image(
+                    solution_img_label, getattr(solution_img_label, "_pil_image", None)
+                )
+            )
+        else:
+            solution_img_label.configure(text="Solution image not found")
+    except Exception as e:
+        solution_img_label.configure(text=f"Error loading solution: {e}")
+    
+    # Show solution info in a message box
+    info_text = (f"Solution ID: {solution_id}\n"
+                f"Makespan: {solution_data['makespan']}\n"
+                f"Resources: {solution_data['resources']}\n"
+                f"Employees: {solution_data['employees']}\n"
+                f"Robots: {solution_data['robots']}\n"
+                f"Created: {solution_data['timestamp']}")
+    
+    messagebox.showinfo(f"Solution {solution_id} Details", info_text)
+
+def run_fwi_background(top_k=5, objectives_names=None, default_values=None):
+    """Run FWI algorithm in background and populate the solutions table"""
+    try:
+        # Commit items from UI to model before solving
+        if not commit_items_to_model():
+            return
+
+        # Set objective type for FWI
+        problem.model_problem(objective_type=4)
+
+        # Create FWI instance with app integration
+        fwi = FWI(
+            jobshop=problem,
+            top_k=top_k,
+            solutions_table=solutions_table,
+            solutions_storage=solutions_storage,
+            solution_counter=[solution_counter]  # Pass as list to allow modification
+        )
+        
+        # Run FWI in background thread
+        print("Starting FWI algorithm in background...")
+        fwi_thread = threading.Thread(target=fwi.start_fwi, daemon=True)
+        fwi_thread.start()
+        
+        # Show progress message
+        messagebox.showinfo("FWI Started", f"FWI algorithm is running in background!\nFinding up to {top_k} solutions...\nYou can continue using the app.")
+        
+    except Exception as e:
+        messagebox.showerror("FWI Error", f"Failed to start FWI: {e}")
+
+def run_fwi(top_k=5, objectives_names=None, default_values=None):
+    """Run FWI algorithm and populate the solutions table"""
+    run_fwi_background(top_k, objectives_names, default_values)
 
 # =========================
 # UI helpers (images / GIF)
@@ -103,7 +274,7 @@ def build_config_data(prob: FJTransportProblem) -> tuple:
         def count_type(key):
             lst = res.get(key, [])
             return len(lst) if lst is not None else 0
-        from utility.costant import KIT, ASM, PACK
+        from utils.costant import KIT, ASM, PACK
         kits = count_type(KIT)
         asms = count_type(ASM)
         packs = count_type(PACK)
@@ -112,6 +283,25 @@ def build_config_data(prob: FJTransportProblem) -> tuple:
         return (num_items, kits, asms, packs, humans, robots, num_conns)
     except Exception:
         return (0, 0, 0, 0, 0, 0, 0)
+
+def build_used_resources_data(prob: FJTransportProblem) -> tuple:
+    """
+    Count only the resources that are actually used in the solution.
+    Returns (num_items, used_kits, used_asms, used_packs, used_humans, used_robots, used_belts)
+    """
+    try:
+        num_res = prob.resource_count.value()
+        num_human = int(prob.humans_used.value())
+        num_robot = int(prob.robot_used.value())
+        # Debug: Print available attributes to understand the structure
+        print(f"Available attributes: {[attr for attr in dir(prob) if not attr.startswith('_')]}")
+
+        # Return only the values we need for the 4 columns
+        print(f"Debug build_used_resources_data: num_res={num_res}, num_human={num_human}, num_robot={num_robot}")
+        return (num_res, num_human, num_robot, 0)
+    except Exception as e:
+        print(f"Error in build_used_resources_data: {e}")
+        return (0, 0, 0, 0)
 
 
 
@@ -301,7 +491,7 @@ def bind_topology_controls(parent_frame, topology_img_label, img_max_w=1000, img
     def rebuild_ws_registry_from_problem():
         try:
             ws_registry.clear()
-            from utility.costant import KIT, ASM, PACK
+            from utils.costant import KIT, ASM, PACK
             for typ, lst in getattr(problem, "resources", {}).items():
                 if typ in ['human', 'robot']:
                     continue
@@ -561,25 +751,31 @@ def bind_premade_topology(parent_frame, topology_img_label, img_max_w=1000, img_
 
     def apply_layout_1():
         global problem
+        # Reset the problem first
         problem = FJTransportProblem(symmetry_breaking=True)
         problem.add_human()
+        problem.add_human()
         problem.set_dur_hum(HUMAN_JOBS_TIME)
-        # problem.add_robot()
-        # problem.set_dur_robot(ROBOT_JOBS_TIME)
+        problem.add_robot()
+        problem.add_robot()
+        problem.set_dur_robot(ROBOT_JOBS_TIME)
 
-        id_kit = problem.add_workstation(WS_KITTING)
-
+        id_kit_1 = problem.add_workstation(WS_KITTING)
+        id_kit_2 = problem.add_workstation(WS_KITTING)
         id_grip = problem.add_workstation(WS_BUILDING_1)
         id_gs = problem.add_workstation(WS_BUILDING_2)
         id_pal = problem.add_workstation(WS_PALLETTING)
+        id_pal_2 = problem.add_workstation(WS_PALLETTING)
 
-        problem.add_transport(id_kit, id_grip)
+        problem.add_transport(id_kit_1, id_grip)
+        problem.add_transport(id_kit_2, id_gs)
         problem.add_transport(id_grip, id_gs)
-        problem.add_transport(id_grip, id_pal)
         problem.add_transport(id_gs, id_pal)
+
 
     def apply_layout_2():
         global problem
+        # Reset the problem first
         problem = FJTransportProblem(symmetry_breaking=True)
         problem.add_human()
         problem.set_dur_hum(HUMAN_JOBS_TIME)
@@ -603,6 +799,7 @@ def bind_premade_topology(parent_frame, topology_img_label, img_max_w=1000, img_
 
     def apply_layout_3():
         global problem
+        # Reset the problem first
         problem = FJTransportProblem(symmetry_breaking=True)
         problem.add_human()
         problem.set_dur_hum(HUMAN_JOBS_TIME)
@@ -648,10 +845,6 @@ def bind_premade_topology(parent_frame, topology_img_label, img_max_w=1000, img_
         try:
             global problem
             problem = FJTransportProblem(symmetry_breaking=True)
-            problem.add_human()
-            problem.set_dur_hum(HUMAN_JOBS_TIME)
-            problem.add_robot()
-            problem.set_dur_robot(ROBOT_JOBS_TIME)
             ensure_dir_for("./images/topology.jpg")
             problem.make_ws_topology(location="./images/topology.jpg")
             refresh_preview()
@@ -786,23 +979,44 @@ def bind_solving_controls(parent_frame, solution_img_label, img_max_w=800, img_m
     """
     Adds a big 'Solve' button that runs the solver and updates the Solution image.
     """
-    # Buttons row (Solve + Export HTML) centered
+    # Buttons row (Solve + Optimize Resources + Export HTML) centered
     btn_row = ttk.Frame(parent_frame)
     btn_row.pack(expand=False, fill="x")
     try:
         btn_row.columnconfigure(0, weight=1)
         btn_row.columnconfigure(1, weight=0)
         btn_row.columnconfigure(2, weight=0)
-        btn_row.columnconfigure(3, weight=1)
+        btn_row.columnconfigure(3, weight=0)
+        btn_row.columnconfigure(4, weight=0)
+        btn_row.columnconfigure(5, weight=1)
     except Exception:
         pass
 
-    solve_btn = ttk.Button(btn_row, text="Solve", style="Solve.TButton")
+    solve_btn = ttk.Button(btn_row, text="Minimize Makespan", style="Solve.TButton")
     solve_btn.grid(row=0, column=1, padx=(8, 4), pady=8, ipady=6)
+
+    optimize_btn = ttk.Button(btn_row, text="Minimize Makespan & Resources", style="Solve.TButton")
+    optimize_btn.grid(row=0, column=2, padx=(4, 4), pady=8, ipady=6)
 
     export_btn = ttk.Button(btn_row, text="Export HTML")
     export_btn.state(["disabled"])  # enabled after a successful solve
-    export_btn.grid(row=0, column=2, padx=(4, 8), pady=8, ipady=6)
+    export_btn.grid(row=0, column=3, padx=(4, 4), pady=8, ipady=6)
+
+    # FWI controls frame
+    fwi_frame = ttk.Frame(btn_row)
+    fwi_frame.grid(row=0, column=4, padx=(4, 8), pady=8, sticky="ew")
+    
+    fwi_btn = ttk.Button(fwi_frame, text="Run FWI", style="Solve.TButton")
+    fwi_btn.pack(side="left")
+    
+    # FWI spinbox
+    fwi_spinbox_label = ttk.Label(fwi_frame)
+    fwi_spinbox_label.pack(side="left", padx=(10, 5))
+    
+    fwi_spinbox_var = tk.IntVar(value=5)  # Default value
+    fwi_spinbox = ttk.Spinbox(fwi_frame, from_=1, to=20, textvariable=fwi_spinbox_var, 
+                             width=5, state="readonly")
+    fwi_spinbox.pack(side="left", padx=(0, 5))
 
     def has_meaningful_content(prob: FJTransportProblem) -> bool:
         try:
@@ -823,9 +1037,13 @@ def bind_solving_controls(parent_frame, solution_img_label, img_max_w=800, img_m
             if not commit_items_to_model():
                 return
             
+            # Generate solution ID and save images BEFORE solving
+            solution_id = generate_solution_id()
+            topology_path, solution_path = save_solution_images(solution_id)
+            
             # Solve current working model
             active_prob = problem
-            active_prob.model_problem()
+            active_prob.model_problem(objective_type=0)
             active_prob.solve(solver="ortools")
             active_prob.make_gantt(folder="./images/sol.jpg")
 
@@ -872,16 +1090,100 @@ def bind_solving_controls(parent_frame, solution_img_label, img_max_w=800, img_m
                     except Exception:
                         ms_val = None
                 ms_text = str(ms_val) if ms_val is not None else "-"
-                items, kits, asms, packs, humans, robots, belts = build_config_data(active_prob)
+                resources, employees, robots, _ = build_used_resources_data(active_prob)
+                
+                # Store solution data
+                store_solution_data(solution_id, ms_text, resources, employees, robots, topology_path, solution_path)
+                
                 if solutions_table is not None:
-                    solutions_table.insert("", "end", values=(ms_text, items, kits, asms, packs, humans, robots, belts))
-            except Exception:
+                    print(f"Debug: About to insert into table: {solution_id}, {ms_text}, {resources}, {employees}, {robots}")
+                    solutions_table.insert("", "end", values=(solution_id, ms_text, resources, employees, robots))
+                    print("Debug: Successfully inserted into table")
+            except Exception as e:
+                print(f"Error storing solution: {e}")
                 pass
 
             # Keep working with the same model; no automatic reset
 
         except Exception as e:
             messagebox.showerror("Solve error", f"Failed to solve: {e}")
+
+    def run_optimize_resources():
+        try:
+            # Commit items from UI to model before solving
+            if not commit_items_to_model():
+                return
+            
+            # Generate solution ID and save images BEFORE solving
+            solution_id = generate_solution_id()
+            topology_path, solution_path = save_solution_images(solution_id)
+            
+            # Solve current working model with resource optimization
+            active_prob = problem
+            active_prob.model_problem(objective_type=1)
+            active_prob.solve(solver="ortools")
+            active_prob.make_gantt(folder="./images/sol.jpg")
+
+            # Load solution image into bottom-left Solution preview
+            stop_gif(solution_img_label)
+            pil_img = Image.open("./images/sol.jpg")
+            solution_img_label._pil_image = pil_img
+
+            def fit_image_to_label(label, pil_image):
+                if pil_image is None:
+                    return
+                w, h = label.winfo_width(), label.winfo_height()
+                if w > 1 and h > 1:
+                    src_w, src_h = pil_image.size
+                    target_w = min(w, src_w)
+                    target_h = min(h, src_h)
+                    img_copy = pil_image.copy()
+                    img_copy.thumbnail((target_w, target_h), Image.LANCZOS)
+                    tk_img = ImageTk.PhotoImage(img_copy)
+                    label.configure(image=tk_img)
+                    label.image = tk_img
+
+            fit_image_to_label(solution_img_label, pil_img)
+            solution_img_label.bind(
+                "<Configure>",
+                lambda e: fit_image_to_label(
+                    solution_img_label, getattr(solution_img_label, "_pil_image", None)
+                )
+            )
+
+            # Enable export after successful solve
+            try:
+                export_btn.state(["!disabled"])
+            except Exception:
+                pass
+
+            # Append to Solutions table
+            try:
+                ms_val = None
+                if hasattr(active_prob, "makespan") and getattr(active_prob.makespan, "value", None):
+                    try:
+                        v = active_prob.makespan.value()
+                        ms_val = int(v) if v is not None else None
+                    except Exception:
+                        ms_val = None
+                ms_text = str(ms_val) if ms_val is not None else "-"
+                resources, employees, robots, _ = build_used_resources_data(active_prob)
+                
+                # Store solution data
+                store_solution_data(solution_id, ms_text, resources, employees, robots, topology_path, solution_path)
+                
+                if solutions_table is not None:
+                    print(f"Debug: About to insert into table: {solution_id}, {ms_text}, {resources}, {employees}, {robots}")
+                    solutions_table.insert("", "end", values=(solution_id, ms_text, resources, employees, robots))
+                    print("Debug: Successfully inserted into table")
+            except Exception as e:
+                print(f"Error storing solution: {e}")
+                pass
+
+            # Keep working with the same model; no automatic reset
+
+        except Exception as e:
+            messagebox.showerror("Optimize Resources error", f"Failed to optimize resources: {e}")
 
     def export_html():
         try:
@@ -918,7 +1220,9 @@ def bind_solving_controls(parent_frame, solution_img_label, img_max_w=800, img_m
             messagebox.showerror("Export HTML", f"Failed to export HTML: {e}")
 
     solve_btn.configure(command=run_solver)
+    optimize_btn.configure(command=run_optimize_resources)
     export_btn.configure(command=export_html)
+    fwi_btn.configure(command=lambda: run_fwi(top_k=int(fwi_spinbox_var.get())))
 
 # ==============
 # Main UI
@@ -1013,11 +1317,29 @@ def main():
 
     # Solutions list (separate columns for each info)
     global solutions_table
-    cols = ("SPAN", "ITEMS", "KIT", "ASM", "PACK", "HUMAN", "ROBOT", "BELTS")
+    cols = ("ID", "SPAN", "RESOURCES", "EMPLOYEES", "ROBOTS")
     solutions_table = ttk.Treeview(solutions_inner, columns=cols, show="headings", height=12)
-    for head, w in [("SPAN", 50), ("ITEMS", 40), ("KIT", 30), ("ASM", 30), ("PACK", 30), ("HUMAN", 40), ("ROBOT", 40), ("BELTS", 40)]:
+    for head, w in [("ID", 45), ("SPAN", 50), ("RESOURCES", 60), ("EMPLOYEES", 60), ("ROBOTS", 50)]:
         solutions_table.heading(head, text=head)
-        solutions_table.column(head, width=w, anchor="center", stretch=False)
+        solutions_table.column(head, width=w, anchor="center", stretch=True)
+    
+    # Add click event handler
+    def on_table_click(event):
+        """Handle click on table row"""
+        # Get the item that was actually clicked using coordinates
+        item = solutions_table.identify_row(event.y)
+        if item:
+            # Get the values from the clicked row
+            values = solutions_table.item(item, "values")
+            if values and len(values) >= 5:
+                solution_id, span, resources, employees, robots = values
+                print(f"Clicked row - ID: {solution_id}, SPAN: {span}, RESOURCES: {resources}, EMPLOYEES: {employees}, ROBOTS: {robots}")
+                # Show the associated images in existing frames
+                show_solution_images(solution_id, topology_img_label, solution_img_label)
+    
+    # Bind the click event to the table
+    solutions_table.bind("<Button-1>", on_table_click)
+    
     solutions_table.pack(expand=True, fill="both")
 
     root.minsize(1100, 750)
