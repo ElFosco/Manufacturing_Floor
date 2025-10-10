@@ -353,7 +353,7 @@ class FJProblem(ABC):
             if count <= 1:
                 return
             idxs = [idx for idx, r in enumerate(rows)
-                    if r.get("Resource") == base_label and r.get("Pattern") != "stripe"]
+                    if r.get("Resource") == base_label]
             idxs.sort(key=lambda j: (rows[j]["Start"], rows[j]["End"]))
             avail = [0] * count  # lane k is free at time avail[k]
             for j in idxs:
@@ -383,22 +383,24 @@ class FJProblem(ABC):
                     continue
                 S, E = int(Sv), int(Ev)
                 res = resource_for_processing(i, op)
+                who, m = self._picked_assignment(i, op)  # ← moved up so we know who does it
+
                 rows.append({
                     "Item": str(i), "Op": OP_NAME.get(op, str(op)),
                     "Task": f"Item {i} – {OP_NAME.get(op, str(op))}",
                     "Start": S, "End": E, "Duration": E - S,
                     "Resource": res,
-                    "Pattern": "solid",
+                    "Pattern": "stripe" if who == "human" else "solid",  # ← stripe on Human lane
                     "TransType": "",
                 })
-                who, m = self._picked_assignment(i, op)
+
                 if who == "human" and m is not None:
                     rows.append({
                         "Item": str(i), "Op": OP_NAME.get(op, str(op)),
                         "Task": f"Item {i} – {OP_NAME.get(op, str(op))} (machine occupied)",
                         "Start": S, "End": E, "Duration": E - S,
                         "Resource": machine_label(m),
-                        "Pattern": "stripe",
+                        "Pattern": "stripe",  # keep stripe on the mirrored machine bar too
                         "TransType": "",
                     })
 
@@ -415,13 +417,13 @@ class FJProblem(ABC):
                 res = resource_for_transport(i, trans)  # "Human" / "Robot" / None
                 if res is None:
                     continue  # hide conveyors
-                pattern = "x" if res == "Human" else "o"
+                pattern = "htrans" if res == "Human" else "rtrans"
                 row = {
                     "Item": str(i), "Op": f"T_{trans}",
                     "Task": f"Item {i} – Transport {trans}",
                     "Start": S, "End": E, "Duration": E - S,
                     "Resource": res,
-                    "Pattern": pattern,
+                    "Pattern": pattern,  # marks as line-only
                     "TransType": ("KB" if trans == KB else "B12" if trans == B12 else "BP"),
                 }
                 rows.append(row)
@@ -510,8 +512,14 @@ class FJProblem(ABC):
             raise ValueError(f"Unknown lane labels not in category order: {stray}")
 
         # patterns
-        pattern_map = {"solid": "", "stripe": "/", "x": ".", "o": ".", "dot": "."}
+        pattern_map = {
+            "solid": "",
+            "stripe": "/",
+            "x": ".", "o": ".", "dot": ".",
+            "htrans": "", "rtrans": "",
+        }
         df["PatternShape"] = df["Pattern"].map(pattern_map).fillna("")
+
 
         palette = q.Plotly
         item_list = sorted(df["Item"].unique(), key=lambda x: int(x) if x.isdigit() else x)
@@ -530,14 +538,10 @@ class FJProblem(ABC):
                     continue
 
                 # --- non-stripe
-                dfn = dfr[dfr["Pattern"] != "stripe"]
+                dfn = dfr[(dfr["Pattern"] != "htrans") & (dfr["Pattern"] != "rtrans")]
                 if not dfn.empty:
                     hovertext = [
                         f"{row['Task']}<br>Start: {row['Start']} End: {row['End']}"
-                        for _, row in dfn.iterrows()
-                    ]
-                    opacities = [
-                        0.4 if (row["Resource"].startswith("Human") and row["Pattern"] == "solid") else 1.0
                         for _, row in dfn.iterrows()
                     ]
                     fig.add_bar(
@@ -550,7 +554,6 @@ class FJProblem(ABC):
                         hoverinfo="text",
                         marker=dict(
                             color=item_color[item],
-                            opacity=opacities,
                             line=dict(width=3, color="white"),
                             pattern=dict(shape=dfn["PatternShape"].tolist(), size=10, solidity=0.5),
                         ),
@@ -589,6 +592,25 @@ class FJProblem(ABC):
                         showlegend=False,
                         width=0.5,
                     )
+
+            for patt in ("htrans", "rtrans"):
+                dtt = dfi[dfi["Pattern"] == patt]
+                if not dtt.empty:
+                    for _, row in dtt.iterrows():
+                        fig.add_scatter(
+                            x=[row["Start"], row["End"]],
+                            y=[row["Resource"], row["Resource"]],
+                            mode="lines",
+                            line=dict(
+                                color=item_color[item],
+                                width=8,
+                                dash="dot",
+                            ),
+                            showlegend=False,
+                            hoverinfo="skip",
+                            legendgroup=str(item),
+                            name=f"{item} transport",
+                        )
 
         # ---------- flow lines to solid endpoints ----------
         def add_poly_segments(fig, color, xys, legendgroup):
@@ -670,6 +692,7 @@ class FJProblem(ABC):
                 for r in order:
                     if r.startswith("Robot #"): return r
             return None
+
 
         # ----- emit flow lines for each item -----
         for item in item_list:

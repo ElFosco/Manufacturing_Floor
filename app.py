@@ -413,7 +413,7 @@ def bind_topology_controls(parent_frame, topology_img_label, img_max_w=1000, img
     subtype_cb = ttk.Combobox(ws_controls, textvariable=subtype_var, state="disabled", width=18)
     subtype_cb.grid(row=0, column=3, padx=5, pady=5, sticky="w")
 
-    add_ws_btn = ttk.Button(ws_controls, text="Add Workstation")
+    add_ws_btn = ttk.Button(ws_controls, text="Add")
     add_ws_btn.grid(row=0, column=4, padx=16, pady=5, sticky="w")
 
     ttk.Separator(parent_frame, orient="horizontal").pack(fill="x", padx=8, pady=(4, 8))
@@ -432,7 +432,7 @@ def bind_topology_controls(parent_frame, topology_img_label, img_max_w=1000, img
     to_cb = ttk.Combobox(tr_controls, textvariable=to_var, state="readonly", width=18)
     to_cb.grid(row=0, column=3, padx=5, pady=5, sticky="w")
 
-    add_tr_btn = ttk.Button(tr_controls, text="Add Conveyor Belt")
+    add_tr_btn = ttk.Button(tr_controls, text="Add")
     add_tr_btn.grid(row=0, column=4, padx=16, pady=5, sticky="w")
 
     # ---------- State ----------
@@ -998,9 +998,9 @@ def bind_solving_controls(parent_frame, solution_img_label, img_max_w=800, img_m
     optimize_btn = ttk.Button(btn_row, text="Minimize Makespan & Resources", style="Solve.TButton")
     optimize_btn.grid(row=0, column=2, padx=(4, 4), pady=8, ipady=6)
 
-    export_btn = ttk.Button(btn_row, text="Export HTML")
-    export_btn.state(["disabled"])  # enabled after a successful solve
-    export_btn.grid(row=0, column=3, padx=(4, 4), pady=8, ipady=6)
+    # export_btn = ttk.Button(btn_row, text="Export HTML")
+    # export_btn.state(["disabled"])  # enabled after a successful solve
+    # export_btn.grid(row=0, column=3, padx=(4, 4), pady=8, ipady=6)
 
     # FWI controls frame
     fwi_frame = ttk.Frame(btn_row)
@@ -1221,7 +1221,7 @@ def bind_solving_controls(parent_frame, solution_img_label, img_max_w=800, img_m
 
     solve_btn.configure(command=run_solver)
     optimize_btn.configure(command=run_optimize_resources)
-    export_btn.configure(command=export_html)
+    # export_btn.configure(command=export_html)
     fwi_btn.configure(command=lambda: run_fwi(top_k=int(fwi_spinbox_var.get())))
 
 # ==============
