@@ -168,7 +168,7 @@ class FJProblem(ABC):
             self.define_symmetry_breaking()
         self.optimize(objective_type)
 
-    def solve(self, solver='ortools', params=None,timeout=None):
+    def solve(self, solver='ortools', params=None,timeout=60):
         start = time.time()
 
         solver = SolverLookup.get(solver, self.m)
@@ -230,6 +230,8 @@ class FJProblem(ABC):
 
 
     def HUM(self,op):
+        if self.dur_hum.get(op, None) is None:
+            return int(1e3)
         return int(self.dur_hum[op])
 
     def ARM(self,op, m):
@@ -245,6 +247,51 @@ class FJProblem(ABC):
         if not self.resources.get('human', []):
             return 0
         return sum(self.HUM(op) * self.x_h[i, op, m] for m in self.M_of[op] if (i, op, m) in self.x_h)
+
+    def assign_agent_lanes(self, rows):
+        """
+        Assign each Human/Robot transport bar to the exact agent
+        chosen by the solver, using aH_tr and aR_tr decisions.
+        Mutates `rows` in place.
+        """
+        num_humans = len(self.resources.get('human', []))
+        num_robots = len(self.resources.get('robot', []))
+
+        # --- Assign transports based on solver decisions ---
+        for row in rows:
+            if not row["Op"].startswith("T_"):  # skip processing ops
+                continue
+
+            # Extract item and transition name from row
+            item = int(row["Item"])
+            trans = row["Op"].replace("T_", "")
+
+            # 1. Try to find the responsible robot
+            assigned = False
+            for r in range(num_robots):
+                v = self.aR_tr.get((item, trans, r))
+                if v is not None and v.value() == 1:
+                    row["Resource"] = f"Robot #{r + 1}"
+                    row["Pattern"] = "rtrans"
+                    assigned = True
+                    break
+
+            # 2. Otherwise, check if a human performed it
+            if not assigned:
+                for h in range(num_humans):
+                    v = self.aH_tr.get((item, trans, h))
+                    if v is not None and v.value() == 1:
+                        row["Resource"] = f"Human #{h + 1}"
+                        row["Pattern"] = "htrans"
+                        assigned = True
+                        break
+
+            # 3. If no human/robot assigned (likely conveyor), skip
+            if not assigned:
+                row["Resource"] = None  # hidden or unassigned
+
+        # Optional: remove any rows with Resource=None (conveyors)
+        rows[:] = [r for r in rows if r["Resource"] is not None]
 
     def make_gantt(self, folder=None, html=False):
         """
@@ -295,7 +342,7 @@ class FJProblem(ABC):
             elif t == ASM and subtype == FLASHLIGHT_SCREWS:
                 return f"GRIP & SCREW #{mid}"
             elif t == "human":
-                return "Human"
+                return "Operator"
             else:
                 return f"WS{mid}"
 
@@ -344,29 +391,6 @@ class FJProblem(ABC):
             s = " ".join(s.split())
             return s
 
-        def assign_agent_lanes(rows, base_label, count):
-            """
-            Greedy interval coloring: assign (Start,End) bars whose Resource == base_label
-            to lanes 'base_label #k' with k in [1..count], avoiding overlaps per lane.
-            Mutates rows in place. Assumes capacity was respected by the model.
-            """
-            if count <= 1:
-                return
-            idxs = [idx for idx, r in enumerate(rows)
-                    if r.get("Resource") == base_label]
-            idxs.sort(key=lambda j: (rows[j]["Start"], rows[j]["End"]))
-            avail = [0] * count  # lane k is free at time avail[k]
-            for j in idxs:
-                S, E = rows[j]["Start"], rows[j]["End"]
-                lane = None
-                for k in range(count):
-                    if avail[k] <= S:
-                        lane = k
-                        break
-                if lane is None:
-                    lane = min(range(count), key=lambda k: avail[k])
-                avail[lane] = E
-                rows[j]["Resource"] = f"{base_label} #{lane + 1}"
 
         # ---------- collect bars ----------
         rows = []
@@ -429,14 +453,110 @@ class FJProblem(ABC):
                 rows.append(row)
                 transport_row_ids.setdefault((i, trans), []).append(len(rows) - 1)
 
-        # --- split pooled agents into lanes and remember exact lane per transport ---
-        num_humans = len(self.resources.get('human', []))
-        num_robots = len(self.resources.get('robot', []))
-        assign_agent_lanes(rows, "Human", num_humans)
-        assign_agent_lanes(rows, "Robot", num_robots)
-        for (i, trans), idxs in transport_row_ids.items():
-            if idxs:
-                transport_lane_map[(i, trans)] = rows[idxs[0]]["Resource"]  # e.g., "Human #2"
+        # ---------- helpers ----------
+        def _chosen_human_for_processing(self, i, op):
+            """Return h such that aH_proc[i,op,h]==1, else None."""
+            if not self.resources.get('human', []):
+                return None
+            for h in range(len(self.resources['human'])):
+                v = self.aH_proc.get((i, op, h))
+                if v is not None and v.value() == 1:
+                    return h
+            return None
+
+        def _chosen_transport_agent(self, i, trans):
+            """Return ('Robot', r) or ('Human', h) chosen for (i,trans), or (None,None) for conveyor/none."""
+            # robots
+            for r in range(len(self.resources.get('robot', []))):
+                v = self.aR_tr.get((i, trans, r))
+                if v is not None and v.value() == 1:
+                    return "Robot", r
+            # humans
+            for h in range(len(self.resources.get('human', []))):
+                v = self.aH_tr.get((i, trans, h))
+                if v is not None and v.value() == 1:
+                    return "Operator", h
+            return None, None
+
+        def _trans_name(t):
+            return "KB" if t == KB else ("B12" if t == B12 else "BP")
+
+        # ---------- collect bars ----------
+        rows = []
+        transport_lane_map = {}  # (i, trans) -> "Human #k"/"Robot #k"
+        transport_row_ids = {}  # (i, trans) -> list of row indices (usually 1)
+
+        # processing ops (now show exact Human #k when a human did it)
+        for i in self.I:
+            for op in self.OPS:
+                if not self.z.get((i, op), 0):
+                    continue
+                Sv, Ev = self.S[i, op].value(), self.E[i, op].value()
+                if Sv is None or Ev is None:
+                    continue
+                S, E = int(Sv), int(Ev)
+
+                # who + which machine (your helper)
+                who, m = self._picked_assignment(i, op)
+
+                # default resource (e.g., a machine lane string from your function)
+                res = resource_for_processing(i, op)
+
+                # if a human actually processed it, place on the specific Human #k lane
+                if who == "human":
+                    h = _chosen_human_for_processing(self, i, op)
+                    if h is not None:
+                        res = f"Operator #{h + 1}"
+
+                rows.append({
+                    "Item": str(i), "Op": OP_NAME.get(op, str(op)),
+                    "Task": f"Item {i} – {OP_NAME.get(op, str(op))}",
+                    "Start": S, "End": E, "Duration": E - S,
+                    "Resource": res,
+                    "Pattern": "stripe" if who == "human" else "solid",
+                    "TransType": "",
+                })
+
+                # mirrored machine-occupancy bar when a human works on machine m
+                if who == "human" and m is not None:
+                    rows.append({
+                        "Item": str(i), "Op": OP_NAME.get(op, str(op)),
+                        "Task": f"Item {i} – {OP_NAME.get(op, str(op))} (machine occupied)",
+                        "Start": S, "End": E, "Duration": E - S,
+                        "Resource": machine_label(m),
+                        "Pattern": "stripe",
+                        "TransType": "",
+                    })
+
+        # transport ops (use actual assignments; skip conveyors)
+        all_transitions = self.get_all_transitions()
+        for i in self.I:
+            for trans in all_transitions:
+                if (i, trans) not in self.S_T:
+                    continue
+                Sv, Ev = self.S_T[i, trans].value(), self.E_T[i, trans].value()
+                if Sv is None or Ev is None:
+                    continue
+                S, E = int(Sv), int(Ev)
+
+                who, idx = _chosen_transport_agent(self, i, trans)
+                if who is None:
+                    continue  # conveyor/no agent → hidden as before
+
+                res = f"{who} #{idx + 1}"
+                pattern = "htrans" if who == "Human" else "rtrans"
+
+                row = {
+                    "Item": str(i), "Op": f"T_{trans}",
+                    "Task": f"Item {i} – Transport {_trans_name(trans)}",
+                    "Start": S, "End": E, "Duration": E - S,
+                    "Resource": res,
+                    "Pattern": pattern,
+                    "TransType": _trans_name(trans),
+                }
+                rows.append(row)
+                transport_row_ids.setdefault((i, trans), []).append(len(rows) - 1)
+                transport_lane_map[(i, trans)] = res  # exact lane used
 
         df = pd.DataFrame(rows)
         if df.empty:
@@ -469,10 +589,10 @@ class FJProblem(ABC):
                 return 7
             if resource.startswith("Robot #"):
                 return 8
-            if resource.startswith("Human #"):
+            if resource.startswith("Operator #"):
                 return 10
-            if resource in ("Human", "Robot"):
-                return 10 if resource == "Human" else 8
+            if resource in ("Operator", "Robot"):
+                return 10 if resource == "Operator" else 8
             if resource == "Unknown":
                 return 11
             return 9
@@ -495,9 +615,9 @@ class FJProblem(ABC):
                 seen.add(res)
 
         # --- Force Robot lanes above Human lanes at bottom ---
-        human_lanes = [r for r in order if r.startswith("Human")]
+        human_lanes = [r for r in order if r.startswith("Operator")]
         robot_lanes = [r for r in order if r.startswith("Robot")]
-        other_lanes = [r for r in order if not (r.startswith("Human") or r.startswith("Robot"))]
+        other_lanes = [r for r in order if not (r.startswith("Operator") or r.startswith("Robot"))]
         human_lanes.sort(key=lambda x: int(x.split("#")[1]) if "#" in x else 10 ** 9)
         robot_lanes.sort(key=lambda x: int(x.split("#")[1]) if "#" in x else 10 ** 9)
         order = other_lanes + robot_lanes + human_lanes
@@ -725,10 +845,10 @@ class FJProblem(ABC):
             bargap=0.05, bargroupgap=0.00,
             legend=dict(groupclick="togglegroup"),
             margin=dict(l=80, r=40, t=60, b=50),
-            xaxis=dict(showgrid=True, gridcolor="lightgray", title="Time", color="white"),
+            xaxis=dict(showgrid=True, gridcolor="lightgray", title="Time", color="white",tickfont=dict(size=20, color="white"),),
             yaxis=dict(
                 showgrid=True, gridcolor="lightgray", title="Resource", color="white",
-                categoryorder="array", categoryarray=order, tickfont=dict(size=10),
+                categoryorder="array", categoryarray=order, tickfont=dict(size=20),
             ),
         )
         fig.update_xaxes(range=[0, self.makespan.value()])
@@ -740,14 +860,14 @@ class FJProblem(ABC):
 
         if folder:
             if not html:
-                fig.write_image(folder, scale=2)
+                fig.write_image(folder, scale=3)
             if html:
                 fig.write_html(folder)
         else:
             fig.show(config={
                 "toImageButtonOptions": {
                     "format": "png", "filename": "schedule",
-                    "width": target_w, "height": target_h, "scale": 2
+                    "width": target_w, "height": target_h, "scale": 3
                 }
             })
 

@@ -352,13 +352,14 @@ class FWI:
         
         return topology_dst, solution_dst
 
-    def store_solution_data(self, solution_id, makespan, resources, employees, robots, topology_path, solution_path):
+    def store_solution_data(self, solution_id, makespan, resources,conv_belts,employees, robots, topology_path, solution_path):
         """Store solution data with associated image paths"""
         if self.solutions_storage is not None:
             self.solutions_storage[solution_id] = {
                 'id': solution_id,
                 'makespan': makespan,
                 'resources': resources,
+                'conv_belts': conv_belts,
                 'employees': employees,
                 'robots': robots,
                 'topology_path': topology_path,
@@ -366,13 +367,13 @@ class FWI:
                 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
 
-    def add_solution_to_table(self, solution_id, makespan, resources, employees, robots):
+    def add_solution_to_table(self, solution_id, makespan, resources,trasnport, employees, robots):
         """Add a new solution to the table (thread-safe)"""
         if self.solutions_table is not None:
             try:
-                print(f"FWI: Adding solution to table: {solution_id}, {makespan}, {resources}, {employees}, {robots}")
+                print(f"FWI: Adding solution to table: {solution_id}, {makespan}, {resources}, {trasnport}, {employees}, {robots}")
                 # Use after() to schedule the table update on the main thread
-                self.solutions_table.after(0, lambda: self.solutions_table.insert("", "end", values=(solution_id, makespan, resources, employees, robots)))
+                self.solutions_table.after(0, lambda: self.solutions_table.insert("", "end", values=(solution_id, makespan, resources, trasnport, employees, robots)))
                 print("FWI: Successfully scheduled solution for table")
             except Exception as e:
                 print(f"FWI: Error adding solution to table: {e}")
@@ -440,6 +441,7 @@ class FWI:
             if self.jobshop and hasattr(self.jobshop, 'make_gantt'):
                 try:
                     self.jobshop.make_gantt(folder="./images/sol.jpg")
+                    self.jobshop.make_ws_updated(location="./images/topology.jpg")
                 except Exception as e:
                     print(f"FWI: Error creating Gantt chart: {e}")
             
@@ -461,6 +463,7 @@ class FWI:
             resources = 0
             employees = 0
             robots = 0
+            transport = 0
             
             try:
                 if hasattr(self.jobshop, "resource_count"):
@@ -469,14 +472,19 @@ class FWI:
                     employees = int(self.jobshop.humans_used.value()) if hasattr(self.jobshop.humans_used, 'value') else 0
                 if hasattr(self.jobshop, "robot_used"):
                     robots = int(self.jobshop.robot_used.value()) if hasattr(self.jobshop.robot_used, 'value') else 0
+                if hasattr(self.jobshop, "robot_used"):
+                    robots = int(self.jobshop.robot_used.value()) if hasattr(self.jobshop.robot_used, 'value') else 0
+                if hasattr(self.jobshop, "tr_count"):
+                    transport = int(self.jobshop.tr_count.value()) if hasattr(self.jobshop.tr_count, 'value') else 0
             except Exception as e:
                 print(f"FWI: Error getting resource data: {e}")
             
             # Store solution data
-            self.store_solution_data(solution_id, ms_text, resources, employees, robots, topology_path, solution_path)
+            self.store_solution_data(solution_id, ms_text, resources,transport,
+                                     employees, robots, topology_path, solution_path)
             
             # Add to table
-            self.add_solution_to_table(solution_id, ms_text, resources, employees, robots)
+            self.add_solution_to_table(solution_id, ms_text, resources,transport, employees, robots)
             
             print(f"FWI: Stored new solution {solution_id}")
             

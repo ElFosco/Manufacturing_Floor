@@ -39,18 +39,44 @@ def generate_solution_id():
     solution_counter += 1
     return f"{solution_counter:03d}"
 
-def store_solution_data(solution_id, makespan, resources, employees, robots, topology_path, solution_path):
+def store_solution_data(solution_id, makespan, resources, transport, employees, robots, topology_path, solution_path):
     """Store solution data with associated image paths"""
     solutions_storage[solution_id] = {
         'id': solution_id,
         'makespan': makespan,
         'resources': resources,
+        'transport': transport,
         'employees': employees,
         'robots': robots,
         'topology_path': topology_path,
         'solution_path': solution_path,
         'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
+
+
+def _load_fit_into_label(label, image_path):
+    stop_gif(label)
+    pil_img = Image.open(image_path)
+    label._pil_image = pil_img
+
+    def fit_image_to_label(lab, pil_image):
+        if pil_image is None:
+            return
+        w = lab.winfo_width()
+        h = lab.winfo_height()
+        if w > 1 and h > 1:
+            src_w, src_h = pil_image.size
+            target_w = min(w, src_w)
+            target_h = min(h, src_h)
+            img_copy = pil_image.copy()
+            img_copy.thumbnail((target_w, target_h), Image.LANCZOS)
+            tk_img = ImageTk.PhotoImage(img_copy)
+            lab.configure(image=tk_img)
+            lab.image = tk_img
+
+    fit_image_to_label(label, pil_img)
+    label.bind("<Configure>", lambda e: fit_image_to_label(label, getattr(label, "_pil_image", None)))
+
 
 def save_solution_images(solution_id):
     """Save topology and solution images with solution ID"""
@@ -149,14 +175,15 @@ def show_solution_images(solution_id, topology_img_label, solution_img_label):
         solution_img_label.configure(text=f"Error loading solution: {e}")
     
     # Show solution info in a message box
-    info_text = (f"Solution ID: {solution_id}\n"
-                f"Makespan: {solution_data['makespan']}\n"
-                f"Resources: {solution_data['resources']}\n"
-                f"Employees: {solution_data['employees']}\n"
-                f"Robots: {solution_data['robots']}\n"
-                f"Created: {solution_data['timestamp']}")
-    
-    messagebox.showinfo(f"Solution {solution_id} Details", info_text)
+    # info_text = (f"Solution ID: {solution_id}\n"
+    #             f"Makespan: {solution_data['makespan']}\n"
+    #             f"Workstations: {solution_data['resources']}\n"
+    #             f"Conv. Belts: {solution_data['transport']}\n"
+    #             f"Operators: {solution_data['employees']}\n"
+    #             f"Robots: {solution_data['robots']}\n"
+    #             f"Created: {solution_data['timestamp']}")
+    #
+    # messagebox.showinfo(f"Solution {solution_id} Details", info_text)
 
 def run_fwi_background(top_k=5, objectives_names=None, default_values=None):
     """Run FWI algorithm in background and populate the solutions table"""
@@ -291,14 +318,14 @@ def build_used_resources_data(prob: FJTransportProblem) -> tuple:
     """
     try:
         num_res = prob.resource_count.value()
-        num_human = int(prob.humans_used.value())
-        num_robot = int(prob.robot_used.value())
+        num_tr = prob.tr_count.value()
+        num_human = int(prob.humans_used if isinstance(prob.humans_used, int) else prob.humans_used.value())
+        num_robot = int(prob.robot_used if isinstance(prob.robot_used, int) else prob.robot_used.value())
         # Debug: Print available attributes to understand the structure
         print(f"Available attributes: {[attr for attr in dir(prob) if not attr.startswith('_')]}")
 
         # Return only the values we need for the 4 columns
-        print(f"Debug build_used_resources_data: num_res={num_res}, num_human={num_human}, num_robot={num_robot}")
-        return (num_res, num_human, num_robot, 0)
+        return (num_res,num_tr,num_human, num_robot)
     except Exception as e:
         print(f"Error in build_used_resources_data: {e}")
         return (0, 0, 0, 0)
@@ -523,7 +550,7 @@ def bind_topology_controls(parent_frame, topology_img_label, img_max_w=1000, img
                 problem.add_human()
                 problem.set_dur_hum(HUMAN_JOBS_TIME)
                 ensure_dir_for("./images/topology.jpg")
-                problem.make_ws_topology(location="./images/topology.jpg")
+                problem.make_ws_updated(location="./images/topology.jpg")
                 preview_topology()
             except Exception as e:
                 messagebox.showerror("Problem error", f"Failed to add human: {e}")
@@ -899,10 +926,10 @@ def bind_product_selection(parent_frame):
                          width=5, state="readonly")
     qty_sp.grid(row=0, column=3, padx=5, pady=5, sticky="w")
 
-    add_item_btn = ttk.Button(row, text="Add Items")
+    add_item_btn = ttk.Button(row, text="Add")
     add_item_btn.grid(row=0, column=4, padx=8, pady=5, sticky="w")
     
-    remove_item_btn = ttk.Button(row, text="Remove Items")
+    remove_item_btn = ttk.Button(row, text="Remove")
     remove_item_btn.grid(row=0, column=5, padx=8, pady=5, sticky="w")
 
     table = ttk.Treeview(parent_frame, columns=("item", "total"), show="headings", height=2)
@@ -975,7 +1002,7 @@ def bind_product_selection(parent_frame):
     add_item_btn.configure(command=add_items)
     remove_item_btn.configure(command=remove_items)
 
-def bind_solving_controls(parent_frame, solution_img_label, img_max_w=800, img_max_h=400):
+def bind_solving_controls(parent_frame, solution_img_label, topology_img_label, img_max_w=800, img_max_h=400):
     """
     Adds a big 'Solve' button that runs the solver and updates the Solution image.
     """
@@ -1033,28 +1060,31 @@ def bind_solving_controls(parent_frame, solution_img_label, img_max_w=800, img_m
 
     def run_solver():
         try:
-            # Commit items from UI to model before solving
             if not commit_items_to_model():
                 return
-            
-            # Generate solution ID and save images BEFORE solving
-            solution_id = generate_solution_id()
-            topology_path, solution_path = save_solution_images(solution_id)
-            
-            # Solve current working model
+
+            # 1) Solve and generate the fresh images FIRST
             active_prob = problem
             active_prob.model_problem(objective_type=0)
             active_prob.solve(solver="ortools")
-            active_prob.make_gantt(folder="./images/sol.jpg")
 
-            # Load solution image into bottom-left Solution preview
+            # Regenerate BOTH preview images right now so the sources are "current"
+            ensure_dir_for("./images/topology.jpg")
+            problem.make_ws_updated(location="./images/topology.jpg")
+            active_prob.make_gantt(folder="./images/sol.jpg")  # fresh gantt
+            _load_fit_into_label(topology_img_label, "./images/topology.jpg")
+
+            # 2) NOW allocate a new id and copy the just-created images
+            solution_id = generate_solution_id()
+            topology_path, solution_path = save_solution_images(solution_id)
+
+            # 3) Update the Solution preview from the freshly generated sol.jpg
             stop_gif(solution_img_label)
             pil_img = Image.open("./images/sol.jpg")
             solution_img_label._pil_image = pil_img
 
             def fit_image_to_label(label, pil_image):
-                if pil_image is None:
-                    return
+                if pil_image is None: return
                 w, h = label.winfo_width(), label.winfo_height()
                 if w > 1 and h > 1:
                     src_w, src_h = pil_image.size
@@ -1067,20 +1097,13 @@ def bind_solving_controls(parent_frame, solution_img_label, img_max_w=800, img_m
                     label.image = tk_img
 
             fit_image_to_label(solution_img_label, pil_img)
-            solution_img_label.bind(
-                "<Configure>",
-                lambda e: fit_image_to_label(
-                    solution_img_label, getattr(solution_img_label, "_pil_image", None)
-                )
-            )
+            solution_img_label.bind("<Configure>",
+                                    lambda e: fit_image_to_label(
+                                        solution_img_label, getattr(solution_img_label, "_pil_image", None)
+                                    )
+                                    )
 
-            # Enable export after successful solve
-            try:
-                export_btn.state(["!disabled"])
-            except Exception:
-                pass
-
-            # Append to Solutions table
+            # 4) Store row + metadata
             try:
                 ms_val = None
                 if hasattr(active_prob, "makespan") and getattr(active_prob.makespan, "value", None):
@@ -1090,20 +1113,16 @@ def bind_solving_controls(parent_frame, solution_img_label, img_max_w=800, img_m
                     except Exception:
                         ms_val = None
                 ms_text = str(ms_val) if ms_val is not None else "-"
-                resources, employees, robots, _ = build_used_resources_data(active_prob)
-                
-                # Store solution data
-                store_solution_data(solution_id, ms_text, resources, employees, robots, topology_path, solution_path)
-                
+                resources,transport,employees,robots,  = build_used_resources_data(active_prob)
+
+                store_solution_data(solution_id, ms_text, resources,transport, employees, robots, topology_path, solution_path)
+
                 if solutions_table is not None:
-                    print(f"Debug: About to insert into table: {solution_id}, {ms_text}, {resources}, {employees}, {robots}")
-                    solutions_table.insert("", "end", values=(solution_id, ms_text, resources, employees, robots))
-                    print("Debug: Successfully inserted into table")
+                    solutions_table.insert("", "end",
+                                           values=(solution_id, ms_text, resources,transport, employees, robots))
             except Exception as e:
                 print(f"Error storing solution: {e}")
                 pass
-
-            # Keep working with the same model; no automatic reset
 
         except Exception as e:
             messagebox.showerror("Solve error", f"Failed to solve: {e}")
@@ -1113,18 +1132,23 @@ def bind_solving_controls(parent_frame, solution_img_label, img_max_w=800, img_m
             # Commit items from UI to model before solving
             if not commit_items_to_model():
                 return
-            
-            # Generate solution ID and save images BEFORE solving
+
+            # 1) Solve and generate the fresh images FIRST
+            active_prob = problem
+            active_prob.model_problem(objective_type=4)  # minimize resources
+            active_prob.solve(solver="ortools")
+
+            # Keep topology preview in sync and generate a fresh Gantt
+            ensure_dir_for("./images/topology.jpg")
+            active_prob.make_ws_updated(location="./images/topology.jpg")
+            active_prob.make_gantt(folder="./images/sol.jpg")
+            _load_fit_into_label(topology_img_label, "./images/topology.jpg")  # <— NEW: update left-top frame
+
+            # 2) NOW allocate a new id and copy the just-created images
             solution_id = generate_solution_id()
             topology_path, solution_path = save_solution_images(solution_id)
-            
-            # Solve current working model with resource optimization
-            active_prob = problem
-            active_prob.model_problem(objective_type=1)
-            active_prob.solve(solver="ortools")
-            active_prob.make_gantt(folder="./images/sol.jpg")
 
-            # Load solution image into bottom-left Solution preview
+            # 3) Update the Solution preview from the freshly generated sol.jpg
             stop_gif(solution_img_label)
             pil_img = Image.open("./images/sol.jpg")
             solution_img_label._pil_image = pil_img
@@ -1151,13 +1175,7 @@ def bind_solving_controls(parent_frame, solution_img_label, img_max_w=800, img_m
                 )
             )
 
-            # Enable export after successful solve
-            try:
-                export_btn.state(["!disabled"])
-            except Exception:
-                pass
-
-            # Append to Solutions table
+            # 4) Store row + metadata
             try:
                 ms_val = None
                 if hasattr(active_prob, "makespan") and getattr(active_prob.makespan, "value", None):
@@ -1167,20 +1185,20 @@ def bind_solving_controls(parent_frame, solution_img_label, img_max_w=800, img_m
                     except Exception:
                         ms_val = None
                 ms_text = str(ms_val) if ms_val is not None else "-"
-                resources, employees, robots, _ = build_used_resources_data(active_prob)
-                
-                # Store solution data
-                store_solution_data(solution_id, ms_text, resources, employees, robots, topology_path, solution_path)
-                
+
+                resources, transport, employees, robots = build_used_resources_data(active_prob)
+
+                # Store solution data (images already saved with this ID)
+                store_solution_data(
+                    solution_id, ms_text, resources,transport, employees, robots, topology_path, solution_path
+                )
+
                 if solutions_table is not None:
-                    print(f"Debug: About to insert into table: {solution_id}, {ms_text}, {resources}, {employees}, {robots}")
-                    solutions_table.insert("", "end", values=(solution_id, ms_text, resources, employees, robots))
-                    print("Debug: Successfully inserted into table")
+                    solutions_table.insert(
+                        "", "end", values=(solution_id, ms_text, resources,transport, employees, robots)
+                    )
             except Exception as e:
                 print(f"Error storing solution: {e}")
-                pass
-
-            # Keep working with the same model; no automatic reset
 
         except Exception as e:
             messagebox.showerror("Optimize Resources error", f"Failed to optimize resources: {e}")
@@ -1307,7 +1325,7 @@ def main():
     # Create full-width Solving controls (spans both left columns, placed above Solution)
     frame_solving_full, solving_inner_full, _ = make_section(container, "Solving", border=True)
     frame_solving_full.grid(row=1, column=0, columnspan=1, sticky="ew", padx=6, pady=6)
-    bind_solving_controls(solving_inner_full, solution_img_label, img_max_w=400, img_max_h=400)
+    bind_solving_controls(solving_inner_full, solution_img_label, topology_img_label, img_max_w=400, img_max_h=400)
 
     # RIGHT-MOST COLUMN: Solutions
     solutions_frame = ttk.Frame(container)
@@ -1317,9 +1335,9 @@ def main():
 
     # Solutions list (separate columns for each info)
     global solutions_table
-    cols = ("ID", "SPAN", "RESOURCES", "EMPLOYEES", "ROBOTS")
+    cols = ("ID", "SPAN", "STATIONS", "BELTS", "OPERATORS", "ROBOTS")
     solutions_table = ttk.Treeview(solutions_inner, columns=cols, show="headings", height=12)
-    for head, w in [("ID", 45), ("SPAN", 50), ("RESOURCES", 60), ("EMPLOYEES", 60), ("ROBOTS", 50)]:
+    for head, w in [("ID", 30), ("SPAN", 45), ("STATIONS", 60),("BELTS", 40), ("OPERATORS", 60), ("ROBOTS", 50)]:
         solutions_table.heading(head, text=head)
         solutions_table.column(head, width=w, anchor="center", stretch=True)
     
@@ -1332,8 +1350,9 @@ def main():
             # Get the values from the clicked row
             values = solutions_table.item(item, "values")
             if values and len(values) >= 5:
-                solution_id, span, resources, employees, robots = values
-                print(f"Clicked row - ID: {solution_id}, SPAN: {span}, RESOURCES: {resources}, EMPLOYEES: {employees}, ROBOTS: {robots}")
+                solution_id, span, resources,transport, employees, robots = values
+                print(f"Clicked row - ID: {solution_id}, SPAN: {span}, "
+                      f"RESOURCES: {resources},TRANSPORT: {transport}, EMPLOYEES: {employees}, ROBOTS: {robots}")
                 # Show the associated images in existing frames
                 show_solution_images(solution_id, topology_img_label, solution_img_label)
     
