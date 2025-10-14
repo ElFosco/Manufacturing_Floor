@@ -3,7 +3,7 @@
   <component name="NewModuleRootManager">
     <content url="file://$MODULE_DIR$" />
     <content url="file://$MODULE_DIR$/../cpmpy" />
-    <orderEntry type="jdk" jdkName="mfloor" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="envTest" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>
