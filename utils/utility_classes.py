@@ -269,15 +269,22 @@ class BatchTuner:
         self.default_vals = default_vals
 
     def add_problem(self,problem):
+        print("Adding problem", type(problem), len(problem.constraints))
         self.list_problems.append(problem)
 
-    def tune(self, max_tries=100, grid=False, time_limit=3600):
+    def tune(self, max_tries=100, grid=False, time_limit=3600, verbose=1):
+        print("Warning: only using first problem")
         if grid:
-            tuner_grid = GridSearchTuner("ortools", self.list_problems)
+            print(f"Running GridSearchTuner for {max_tries} tries, time_limit {time_limit}")
+            tuner_grid = GridSearchTuner("ortools", self.list_problems[0], all_params=self.params, defaults=self.default_vals)
             best_param = tuner_grid.tune(max_tries=max_tries, time_limit=time_limit)
         else:
-            tuner_param = ParameterTuner("ortools", self.list_problems)
-            best_param = tuner_param.tune(max_tries=max_tries, time_limit=time_limit)
+            print(f"Running ParameterTuner for {max_tries} tries, time_limit {time_limit}")
+            import cpmpy.tools
+            print(cpmpy.tools.__file__)
+            tuner_param = ParameterTuner("ortools", self.list_problems[0], all_params=self.params, defaults=self.default_vals)
+            best_param = tuner_param.tune(max_tries=max_tries, time_limit=time_limit) #, verbose=verbose) # 'verbose' not upstream yet
+        print("Found parameters:", best_param)
         self.save_best_params(best_param)
     
     def save_best_params(self, best_params, output_dir="results", filename="best_tuning_params.json"):

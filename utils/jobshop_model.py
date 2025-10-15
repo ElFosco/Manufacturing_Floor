@@ -170,6 +170,9 @@ class FJProblem(ABC):
 
     def solve(self, solver='ortools', params=None,timeout=60):
         start = time.time()
+        if params == None:
+            # from a tuning run by Tias
+            params = {'search_branching': 2, 'boolean_encoding_level': 0, 'linearization_level': 0, 'cp_model_probing_level': 0, 'cp_model_presolve': 1, 'use_phase_saving': 1, 'symmetry_level': 4}
 
         solver = SolverLookup.get(solver, self.m)
         if params is not None:
