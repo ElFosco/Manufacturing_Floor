@@ -1,7 +1,7 @@
 import math
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from termios import B2400
+
 
 import cpmpy as cp
 import pandas as pd

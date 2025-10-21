@@ -428,7 +428,7 @@ def bind_topology_controls(parent_frame, topology_img_label, img_max_w=1000, img
     ws_controls = ttk.Frame(parent_frame, padding=8)
     ws_controls.pack(anchor="w", fill="x")
 
-    ttk.Label(ws_controls, text="Workstation Type:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+    ttk.Label(ws_controls, text="Workstation:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
     type_var = tk.StringVar()
     type_cb = ttk.Combobox(ws_controls, textvariable=type_var,
                            values=list(TYPE_TO_SUBTYPES.keys()),
@@ -1019,10 +1019,10 @@ def bind_solving_controls(parent_frame, solution_img_label, topology_img_label, 
     except Exception:
         pass
 
-    solve_btn = ttk.Button(btn_row, text="Minimize Makespan", style="Solve.TButton")
+    solve_btn = ttk.Button(btn_row, text="Min. Span", style="Solve.TButton")
     solve_btn.grid(row=0, column=1, padx=(8, 4), pady=8, ipady=6)
 
-    optimize_btn = ttk.Button(btn_row, text="Minimize Makespan & Resources", style="Solve.TButton")
+    optimize_btn = ttk.Button(btn_row, text="Min. Span & Resources", style="Solve.TButton")
     optimize_btn.grid(row=0, column=2, padx=(4, 4), pady=8, ipady=6)
 
     # export_btn = ttk.Button(btn_row, text="Export HTML")
@@ -1033,7 +1033,7 @@ def bind_solving_controls(parent_frame, solution_img_label, topology_img_label, 
     fwi_frame = ttk.Frame(btn_row)
     fwi_frame.grid(row=0, column=4, padx=(4, 8), pady=8, sticky="ew")
     
-    fwi_btn = ttk.Button(fwi_frame, text="Run FWI", style="Solve.TButton")
+    fwi_btn = ttk.Button(fwi_frame, text="Enum.", style="Solve.TButton")
     fwi_btn.pack(side="left")
     
     # FWI spinbox
@@ -1327,39 +1327,45 @@ def main():
     frame_solving_full.grid(row=1, column=0, columnspan=1, sticky="ew", padx=6, pady=6)
     bind_solving_controls(solving_inner_full, solution_img_label, topology_img_label, img_max_w=400, img_max_h=400)
 
-    # RIGHT-MOST COLUMN: Solutions
+    # RIGHT-MOST COLUMN: Solutions (split vertically: top = table, bottom = QR)
     solutions_frame = ttk.Frame(container)
     solutions_frame.grid(row=0, column=2, rowspan=3, sticky="nsew", padx=6, pady=6)
+    solutions_frame.columnconfigure(0, weight=1)
+    solutions_frame.rowconfigure(0, weight=3)  # table gets more space
+    solutions_frame.rowconfigure(1, weight=2)  # QR code panel
+
+    # Top: Solutions table section
     solutions_section, solutions_inner, _ = make_section(solutions_frame, "Solutions", border=True)
-    solutions_section.pack(expand=True, fill="both")
+    solutions_section.grid(row=0, column=0, sticky="nsew")
 
     # Solutions list (separate columns for each info)
     global solutions_table
     cols = ("ID", "SPAN", "STATIONS", "BELTS", "OPERATORS", "ROBOTS")
     solutions_table = ttk.Treeview(solutions_inner, columns=cols, show="headings", height=12)
-    for head, w in [("ID", 30), ("SPAN", 45), ("STATIONS", 60),("BELTS", 40), ("OPERATORS", 60), ("ROBOTS", 50)]:
+    for head, w in [("ID", 30), ("SPAN", 45), ("STATIONS", 60), ("BELTS", 40), ("OPERATORS", 60), ("ROBOTS", 50)]:
         solutions_table.heading(head, text=head)
         solutions_table.column(head, width=w, anchor="center", stretch=True)
-    
-    # Add click event handler
+
     def on_table_click(event):
         """Handle click on table row"""
-        # Get the item that was actually clicked using coordinates
         item = solutions_table.identify_row(event.y)
         if item:
-            # Get the values from the clicked row
             values = solutions_table.item(item, "values")
             if values and len(values) >= 5:
-                solution_id, span, resources,transport, employees, robots = values
+                solution_id, span, resources, transport, employees, robots = values
                 print(f"Clicked row - ID: {solution_id}, SPAN: {span}, "
                       f"RESOURCES: {resources},TRANSPORT: {transport}, EMPLOYEES: {employees}, ROBOTS: {robots}")
-                # Show the associated images in existing frames
                 show_solution_images(solution_id, topology_img_label, solution_img_label)
-    
-    # Bind the click event to the table
+
     solutions_table.bind("<Button-1>", on_table_click)
-    
     solutions_table.pack(expand=True, fill="both")
+
+    # Bottom: QR Code image section
+    qr_section, _qr_inner, _qr_label = make_section(
+        solutions_frame, "Link to Demo", "./images/qrcode.jpg", 290, 290, border=True
+    )
+    qr_section.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+
 
     root.minsize(1100, 750)
     root.mainloop()
