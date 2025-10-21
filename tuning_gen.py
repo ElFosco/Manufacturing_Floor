@@ -3,18 +3,18 @@ from utils.costant import *
 from utils.utility_classes import BatchTuner
 
 
-params = {  'optimize_with_core' : [False, True],
+params = {  #'optimize_with_core' : [False, True],
             'search_branching': [0,1,2,3,4,5,6],
             'boolean_encoding_level' : [0,1,2,3],
             'linearization_level': [0, 1, 2],
-            'core_minimization_level' : [0,1,2],
+            #'core_minimization_level' : [0,1,2],
             'cp_model_probing_level': [0, 1, 2, 3],
-            # 'cp_model_presolve' : [False, True],
+            'cp_model_presolve' : [False, True],
             # 'clause_cleanup_ordering' : [0,1],
             # 'binary_minimization_algorithm' : [0,1,2,3,4],
             # 'minimization_algorithm' : [0,1,2,3],
-            # 'use_phase_saving' : [False, True],
-            # 'symmetry_level': [1, 2, 3, 4],
+            'use_phase_saving' : [False, True],
+            'symmetry_level': [1, 2, 3, 4],
             # 'use_dynamic_precedence_in_cumulative': [False, True],
             # 'use_overload_checker_in_cumulative':  [False, True],
             # 'use_timetable_edge_finding_in_cumulative': [False, True],
@@ -22,18 +22,18 @@ params = {  'optimize_with_core' : [False, True],
         }
 
 defaults = {
-            'optimize_with_core': False,
+            #'optimize_with_core': False,
             'search_branching': 2,
             'boolean_encoding_level': 1,
             'linearization_level': 0,
-            'core_minimization_level': 2,
+            #'core_minimization_level': 2,
             'cp_model_probing_level': 2,
-            # 'cp_model_presolve': True,
+            'cp_model_presolve': True,
             # 'clause_cleanup_ordering': 0,
             # 'binary_minimization_algorithm': 1,
             # 'minimization_algorithm': 2,
-            # 'use_phase_saving': True,
-            # 'symmetry_level': 2,
+            'use_phase_saving': True,
+            'symmetry_level': 2,
             # 'use_dynamic_precedence_in_cumulative': False,
             # 'use_overload_checker_in_cumulative':  False,
             # 'use_timetable_edge_finding_in_cumulative': False,
@@ -65,8 +65,8 @@ problem.add_transport(id_kit_2, id_gs_2)
 problem.add_transport(id_gs_2, id_pal_2)
 
 problem.set_t_conv(3)
-problem.add_items_to_build(FLASHLIGHT_CLIPPED,5)
-problem.add_items_to_build(FLASHLIGHT_SCREWS,5)
+problem.add_items_to_build(FLASHLIGHT_CLIPPED,4)
+problem.add_items_to_build(FLASHLIGHT_SCREWS,4)
 problem.model_problem()
 
 tuner.add_problem(problem.m)
@@ -183,4 +183,4 @@ problem.model_problem()
 tuner.add_problem(problem.m)
 
 
-tuner.tune(max_tries=100,time_limit=3600)
+tuner.tune(max_tries=None, verbose=2)
