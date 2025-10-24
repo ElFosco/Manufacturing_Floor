@@ -395,127 +395,220 @@ class FJTransportProblem(FJProblem):
             for pred, succ in self.PREC_i[i]:
                 self.m += self.S[i, succ] >= self.E[i, pred]
 
-        # ----- transport precedence (dynamic) & need -----
-        def _k_ops(i):  return [op for op in self.OPS_i[i] if op in (K1, K2)]
-        def _b_ops(i):  return [op for op in self.OPS_i[i] if op in (B1, B2)]
+                # ----- transport precedence (dynamic) & need -----
+                def _k_ops(i):
+                    return [op for op in self.OPS_i[i] if op in (K1, K2)]
 
+                def _b_ops(i):
+                    return [op for op in self.OPS_i[i] if op in (B1, B2)]
 
-        for i in self.I:
-            kops = _k_ops(i)
-            bops = _b_ops(i)
-            item_type = self.items_to_build[i]
-            
-            # Get transitions for this specific item
-            stage_transitions = get_stage_transitions(item_type)
-            internal_transitions = get_internal_transitions(item_type)
-            
-            # Handle stage transitions (between different stages)
-            for trans in stage_transitions:
-                if trans == KB and kops and bops:
-                    # Kitting to Assembly
-                    lastK, firstB = kops[-1], bops[0]
-                    self.m += self.S_T[i, KB] >= self.E[i, lastK]
-                    self.m += self.S[i, firstB] >= self.E_T[i, KB]
-                elif trans == BP and bops and self.z[i, P]:
-                    # Assembly to Packing
-                    lastB = bops[-1]
-                    self.m += self.S_T[i, BP] >= self.E[i, lastB]
-                    self.m += self.S[i, P] >= self.E_T[i, BP]
-            
-            # Handle internal transitions (within the same stage)
-            for from_op, to_op in internal_transitions:
-                if from_op == B1 and to_op == B2 and len(bops) >= 2:
-                    # B1 to B2 transition within assembly - use B12 as transition type
-                    b_from, b_to = bops[0], bops[1]
-                    self.m += self.S_T[i, B12] >= self.E[i, b_from]
-                    self.m += self.S[i, b_to] >= self.E_T[i, B12]
+                WS_ASM = self.WS_GRIP + self.WS_SCREW
 
-            # choose transport modes and durations (dynamic)
-            # Map internal transition pairs to their transition types
-            internal_transition_types = []
-            for from_op, to_op in internal_transitions:
-                if from_op == B1 and to_op == B2:
-                    internal_transition_types.append(B12)
-            # Add more mappings here if needed
+                # ------------------------------------------------------------------
+                # helper: detect if B1 and B2 of item i are done on the SAME station
+                # same_station_B12[i] == 1  <=>  exists m s.t. B1 and B2 both run on m
+                # else 0
+                # ------------------------------------------------------------------
+                self.same_station_B12 = {}
+                self._both_here_flags = {}  # optional debug vars, not strictly needed but helpful
 
-            for trans in stage_transitions + internal_transition_types:
-                # Determine if this transition is needed for this item
-                need = 0
-                if trans == KB and kops and bops:
-                    need = 1
-                elif trans == BP and bops and self.z[i, P]:
-                    need = 1
-                elif trans == B12 and len(bops) >= 2:
-                    need = 1
+                for i in self.I:
+                    # only relevant if item i actually has both B1 and B2 in its route
+                    bops_i = _b_ops(i)
+                    if len(bops_i) >= 2 and self.z.get((i, B1), 0) and self.z.get((i, B2), 0):
+                        self.same_station_B12[i] = cp.boolvar(name=f"SAME_STATION_B12_{i}")
 
-                # Build the list of transport options (human / robot / conv links)
-                transport_options = []
-                transport_time = 0
+                        both_list = []
+                        for m in WS_ASM:
+                            # both_here[i,m] = 1 iff OP_flag[i,B1,m] == 1 and OP_flag[i,B2,m] == 1
+                            both_var = cp.boolvar(name=f"BOTH_B1_B2_{i}_{m}")
+                            self._both_here_flags[i, m] = both_var
 
-                if (i, trans, "human") in self.zT:
-                    transport_options.append(self.zT[i, trans, "human"])
-                    transport_time += self.zT[i, trans, "human"] * self.t_hum
+                            # both_var <= OP_flag[i,B1,m]
+                            self.m += (both_var <= self.OP_flag.get((i, B1, m), 0))
+                            # both_var <= OP_flag[i,B2,m]
+                            self.m += (both_var <= self.OP_flag.get((i, B2, m), 0))
+                            # both_var >= OP_flag[i,B1,m] + OP_flag[i,B2,m] - 1
+                            self.m += (
+                                    both_var >=
+                                    (self.OP_flag.get((i, B1, m), 0) +
+                                     self.OP_flag.get((i, B2, m), 0) - 1)
+                            )
 
-                if (i, trans, "robot") in self.zT:
-                    transport_options.append(self.zT[i, trans, "robot"])
-                    transport_time += self.zT[i, trans, "robot"] * self.t_robot
+                            both_list.append(both_var)
 
-                pairs = self._conv_pairs(trans)
-                for m1, m2 in pairs:
-                    key = (i, trans, ("conv", m1, m2))
-                    if key in self.zT:
-                        transport_options.append(self.zT[key])
-                        transport_time += self.zT[key] * self.t_conv
+                        # same_station_B12[i] == OR_m both_here[i,m]
+                        # OR(a,b,c) can be linearized as:
+                        #   same <= a+b+c
+                        #   same >= a
+                        #   same >= b
+                        #   same >= c
+                        self.m += (self.same_station_B12[i] <= cp.sum(both_list))
+                        for bvar in both_list:
+                            self.m += (self.same_station_B12[i] >= bvar)
 
-                # Force: if transition not needed -> all options 0; if needed -> exactly one 1
-                if transport_options:
-                    self.m += (cp.sum(transport_options) == need)
-                else:
-                    # If needed but no options exist, model must be infeasible (as it should be)
-                    self.m += (need == 0)
+                    else:
+                        # if B1/B2 not both present, define it as constant 0 for safety
+                        self.same_station_B12[i] = 0
 
-                # Duration binding stays correct: if need=0, all zT are 0 → E_T == S_T
-                self.m += (self.E_T[i, trans] == self.S_T[i, trans] + transport_time)
+                # ------------------------------------------------------------------
+                # stage/internal precedence constraints (K->B, B1->B2, B->P)
+                # and then transport-mode choice and timing
+                # ------------------------------------------------------------------
+                for i in self.I:
+                    kops = _k_ops(i)
+                    bops = _b_ops(i)
+                    item_type = self.items_to_build[i]
 
+                    # Get transitions for this specific item
+                    stage_transitions = get_stage_transitions(item_type)
+                    internal_transitions = get_internal_transitions(item_type)
 
-        for i in self.I:
-            kops = _k_ops(i)
-            bops = _b_ops(i)
-            item_type = self.items_to_build[i]
-            
-            # Get transitions for this specific item
-            stage_transitions = get_stage_transitions(item_type)
-            internal_transitions = get_internal_transitions(item_type)
-            
-            # Handle stage transitions
-            for trans in stage_transitions:
-                if trans == KB and kops and bops:
-                    prevK, firstB = kops[-1], bops[0]
-                    pairs = self._conv_pairs(KB)
-                    for m1, m2 in pairs:
-                        key = (i, KB, ("conv", m1, m2))
-                        if key in self.zT:
-                            self.m += self.zT[key] <= self.OP_flag.get((i, prevK, m1), 0)
-                            self.m += self.zT[key] <= self.OP_flag.get((i, firstB, m2), 0)
-                elif trans == BP and bops and self.z[i, P]:
-                    lastB = bops[-1]
-                    pairs = self._conv_pairs(BP)
-                    for m1, m2 in pairs:
-                        key = (i, BP, ("conv", m1, m2))
-                        if key in self.zT:
-                            self.m += self.zT[key] <= self.OP_flag.get((i, lastB, m1), 0)
-                            self.m += self.zT[key] <= self.OP_flag.get((i, P, m2), 0)
-            
-            # Handle internal transitions
-            for from_op, to_op in internal_transitions:
-                if from_op == B1 and to_op == B2 and len(bops) >= 2:
-                    b_from, b_to = bops[0], bops[1]
-                    pairs = self._conv_pairs(B12)
-                    for m1, m2 in pairs:
-                        key = (i, B12, ("conv", m1, m2))
-                        if key in self.zT:
-                            self.m += self.zT[key] <= self.OP_flag.get((i, b_from, m1), 0)
-                            self.m += self.zT[key] <= self.OP_flag.get((i, b_to, m2), 0)
+                    # ----- precedence between production ops and transport ops -----
+                    # Handle stage transitions (between different stages)
+                    for trans in stage_transitions:
+                        if trans == KB and kops and bops:
+                            # Kitting to Assembly
+                            prevK, firstB = kops[-1], bops[0]
+                            # transport KB can only start after last kitting op
+                            self.m += self.S_T[i, KB] >= self.E[i, prevK]
+                            # first build op can only start after KB transport finishes
+                            self.m += self.S[i, firstB] >= self.E_T[i, KB]
+
+                        elif trans == BP and bops and self.z[i, P]:
+                            # Assembly to Packing
+                            lastB = bops[-1]
+                            self.m += self.S_T[i, BP] >= self.E[i, lastB]
+                            self.m += self.S[i, P] >= self.E_T[i, BP]
+
+                    # Handle internal B1->B2 transition
+                    for from_op, to_op in internal_transitions:
+                        if from_op == B1 and to_op == B2 and len(bops) >= 2:
+                            b_from, b_to = bops[0], bops[1]
+                            # internal handoff B12 starts after B1 ends
+                            self.m += self.S_T[i, B12] >= self.E[i, b_from]
+                            # B2 can only start after that handoff finishes
+                            self.m += self.S[i, b_to] >= self.E_T[i, B12]
+
+                    # ------------------------------------------------------------------
+                    # choose transport modes and durations (dynamic)
+                    # ------------------------------------------------------------------
+                    # Map internal transition pairs to their synthetic transition labels
+                    internal_transition_types = []
+                    for from_op, to_op in internal_transitions:
+                        if from_op == B1 and to_op == B2:
+                            internal_transition_types.append(B12)
+                    # stage_transitions is e.g. [KB, BP]; internal_transition_types may include B12
+                    for trans in stage_transitions + internal_transition_types:
+
+                        # Determine if this transition is structurally needed for this item
+                        need = 0
+                        if trans == KB and kops and bops:
+                            need = 1
+                        elif trans == BP and bops and self.z[i, P]:
+                            need = 1
+                        elif trans == B12 and len(bops) >= 2:
+                            need = 1
+
+                        # Build the list of transport options (human / robot / conv links)
+                        transport_options = []
+                        transport_time = 0
+
+                        # human carry option?
+                        keyH = (i, trans, "human")
+                        if keyH in self.zT:
+                            transport_options.append(self.zT[keyH])
+                            transport_time += self.zT[keyH] * self.t_hum
+
+                        # robot carry option?
+                        keyR = (i, trans, "robot")
+                        if keyR in self.zT:
+                            transport_options.append(self.zT[keyR])
+                            transport_time += self.zT[keyR] * self.t_robot
+
+                        # conveyor options (m1 -> m2)
+                        pairs = self._conv_pairs(trans)
+                        for m1, m2 in pairs:
+                            keyC = (i, trans, ("conv", m1, m2))
+                            if keyC in self.zT:
+                                transport_options.append(self.zT[keyC])
+                                transport_time += self.zT[keyC] * self.t_conv
+
+                        sum_opts = cp.sum(transport_options) if transport_options else 0
+
+                        # -------------------------
+                        # CASE 1: trans is KB or BP
+                        # -------------------------
+                        if trans in (KB, BP):
+                            # Old behavior: if we need it, pick exactly one mode; otherwise pick none.
+                            if transport_options:
+                                self.m += (sum_opts == need)
+                            else:
+                                # If needed but no options exist => infeasible model (factory can't do it)
+                                self.m += (need == 0)
+
+                            # Timing for KB/BP: E_T = S_T + chosen transport_time
+                            self.m += (self.E_T[i, trans] == self.S_T[i, trans] + transport_time)
+
+                        # -------------------------
+                        # CASE 2: trans is B12 (internal B1->B2 handoff)
+                        # -------------------------
+                        elif trans == B12 and need == 1:
+                            # We will allow EITHER:
+                            #   (a) If B1 and B2 are on the SAME station:
+                            #         - no transport mode
+                            #         - zero duration
+                            #   (b) If they are on DIFFERENT stations:
+                            #         - exactly one transport mode
+                            #         - duration = that transport_time
+
+                            same_stat = self.same_station_B12[i]  # boolvar or 0
+
+                            # Enforce the mode-choice logic using same_stat:
+                            # If same_stat == 1  => sum_opts == 0
+                            # If same_stat == 0  => sum_opts == 1
+                            if transport_options:
+                                # sum_opts <= 1 - same_stat
+                                self.m += (sum_opts <= (1 - same_stat))
+                                # sum_opts >= 1 - same_stat
+                                self.m += (sum_opts >= (1 - same_stat))
+                            else:
+                                # no possible transport options declared
+                                # then we must force same_stat=1, otherwise infeasible
+                                # i.e. only allowed if they truly stay on same station
+                                self.m += (same_stat == 1)
+
+                            # Now constrain timing:
+                            # Let d = E_T - S_T for B12
+                            d = self.E_T[i, B12] - self.S_T[i, B12]
+                            bigM = self.ub  # safe upper bound
+
+                            # When same_stat == 1:
+                            #   we want d == 0 (no movement delay)
+                            # This is enforced by:
+                            #   d <= bigM * (1 - same_stat)
+                            #   d >= -bigM * (1 - same_stat)
+                            self.m += (d <= bigM * (1 - same_stat))
+                            self.m += (d >= -bigM * (1 - same_stat))
+
+                            # When same_stat == 0:
+                            #   we want d == transport_time (real move)
+                            # We linearize with two bounds:
+                            #   d <= transport_time + bigM * same_stat
+                            #   d >= transport_time - bigM * same_stat
+                            self.m += (d <= transport_time + bigM * same_stat)
+                            self.m += (d >= transport_time - bigM * same_stat)
+
+                        # -------------------------
+                        # CASE 3: trans == B12 but need == 0
+                        # (shouldn't really happen if len(bops)<2, but keep it safe)
+                        # -------------------------
+                        elif trans == B12 and need == 0:
+                            # If no B12 is conceptually needed, forbid all modes and force 0 duration
+                            if transport_options:
+                                self.m += (sum_opts == 0)
+                            # Force zero-length B12 anyway
+                            self.m += (self.E_T[i, B12] == self.S_T[i, B12])
 
         # capacities: machines
         for m, ops_here in self.OPS_on_WS.items():
