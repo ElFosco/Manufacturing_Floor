@@ -254,8 +254,8 @@ class FJTransportProblem(FJProblem):
         for m in self.OPS_on_WS.keys():
             self.y_WS[m] = cp.boolvar(name=f"Y_WS_{m}")
 
-        self.y_human = cp.boolvar(name="Y_HUMAN") if self.resources.get('human', []) else 0
-        self.y_robot = cp.boolvar(name="Y_ROBOT") if self.resources.get('robot', []) else 0
+        # self.y_human = cp.boolvar(name="Y_HUMAN") if self.resources.get('human', []) else 0
+        # self.y_robot = cp.boolvar(name="Y_ROBOT") if self.resources.get('robot', []) else 0
 
         # build vars per physical link
         self.y_conv = {}
@@ -271,41 +271,40 @@ class FJTransportProblem(FJProblem):
     def define_constraints(self):
         self.m = cp.Model()
 
-        # machines: if any op is processed on m, then y_WS[m] = 1
+        # machines: if any op is processed on m, then y_WS[m] = 1               #OK
         for m, ops_here in self.OPS_on_WS.items():
             for i in self.I:
                 for op in ops_here:
                     if not self.z[i, op]:
                         continue
                     # OP_flag[i,op,m] == 1 when op i is executed on machine m (human or arm)
-                    self.m += self.y_WS[m] >= self.OP_flag.get((i, op, m), 0)
+                    self.m += self.y_WS[m] >= self.OP_flag.get((i, op, m), 0)           #BETTER TO USE AN OR
 
 
         # human used if any human processing or human transport is used
-        if self.resources.get('human', []):
-            for i in self.I:
-                for op in self.OPS:
-                    if not self.z[i, op]:
-                        continue
-                    self.m += self.y_human >= self.H_flag[i, op]
-            all_transitions = self.get_all_transitions()
-            for i in self.I:
-                for trans in all_transitions:
-                    key = (i, trans, "human")
-                    if key in self.zT:
-                        self.m += self.y_human >= self.zT[key]
-
+        # if self.resources.get('human', []):
+        #     for i in self.I:
+        #         for op in self.OPS:
+        #             if not self.z[i, op]:
+        #                 continue
+        #             self.m += self.y_human >= self.H_flag[i, op]
+        #     all_transitions = self.get_all_transitions()
+        #     for i in self.I:
+        #         for trans in all_transitions:
+        #             key = (i, trans, "human")
+        #             if key in self.zT:
+        #                 self.m += self.y_human >= self.zT[key]
         # robot used if any robot transport is used
-        if self.resources.get('robot', []):
-            all_transitions = self.get_all_transitions()
-            for i in self.I:
-                for trans in all_transitions:
-                    key = (i, trans, "robot")
-                    if key in self.zT:
-                        self.m += self.y_robot >= self.zT[key]
+        # if self.resources.get('robot', []):
+        #     all_transitions = self.get_all_transitions()
+        #     for i in self.I:
+        #         for trans in all_transitions:
+        #             key = (i, trans, "robot")
+        #             if key in self.zT:
+        #                 self.m += self.y_robot >= self.zT[key]
 
         # conveyor link (m1,m2) used if any transport uses that link
-        for (m1, m2), y in self.y_conv.items():
+        for (m1, m2), y in self.y_conv.items():                         #OK
             all_transitions = self.get_all_transitions()
             z_terms = []
             for i in self.I:
@@ -314,7 +313,7 @@ class FJTransportProblem(FJProblem):
                     z = self.zT.get(key, None)
                     if z is not None:
                         # if any z is 1 => y must be 1
-                        self.m += (y >= z)
+                        self.m += (y >= z)                                  #BETTER TO USE AN OR
                         z_terms.append(z)
             if z_terms:
                 # y cannot be 1 unless at least one z is 1
@@ -324,30 +323,30 @@ class FJTransportProblem(FJProblem):
                 self.m += (y == 0)
 
         # ----- human processing: exactly the human doing it sums to H_flag -----
-        for i in self.I:
+        for i in self.I:                                                #OK
             for op in self.OPS:
                 if not self.z[i, op]:
                     continue
                 if self.resources.get('human', []):
                     sum_assigned = cp.sum(self.aH_proc[i, op, h] for h in range(len(self.resources['human'])))
                     # If op is done by human => assigned to exactly one human; else 0
-                    self.m += (sum_assigned == self.H_flag[i, op])
+                    self.m += (self.H_flag[i, op] == sum_assigned)
 
         # ----- human transports: sum over humans equals mode-choice zT(...,"human") -----
-        for i in self.I:
+        for i in self.I:                                                #OK
             for trans in self.get_all_transitions():
                 keyH = (i, trans, "human")
                 if keyH in self.zT:
                     sum_assigned = cp.sum(self.aH_tr[i, trans, h] for h in range(len(self.resources['human'])))
-                    self.m += (sum_assigned == self.zT[keyH])
+                    self.m += (self.zT[keyH] == sum_assigned)
 
         # ----- robot transports: sum over robots equals mode-choice zT(...,"robot") -----
-        for i in self.I:
+        for i in self.I:                                                #OK
             for trans in self.get_all_transitions():
                 keyR = (i, trans, "robot")
                 if keyR in self.zT:
                     sum_assigned = cp.sum(self.aR_tr[i, trans, r] for r in range(len(self.resources['robot'])))
-                    self.m += (sum_assigned == self.zT[keyR])
+                    self.m += (self.zT[keyR] == sum_assigned)
 
 
         # tie count variable to the sum of all resource indicators
@@ -358,29 +357,27 @@ class FJTransportProblem(FJProblem):
             for op in self.OPS:
                 if not self.z[i, op]: continue
                 if self.resources.get('human', []):
-                    self.m += (
+                    self.m += (                                                        #OK
                         sum(self.x_h.get((i, op, m), 0) for m in self.M_of[op]) +
                         sum(self.x_a.get((i, op, m), 0) for m in self.M_of[op])
                     ) == 1
-                    for m in self.M_of[op]:
+                    for m in self.M_of[op]:                                            #
                         self.m += self.OP_flag[i, op, m] == (self.x_h.get((i, op, m), 0) + self.x_a.get((i, op, m), 0))
-                        self.m += self.OP_flag[i, op, m] <= 1
-                    self.m += self.H_flag[i, op] == sum(self.x_h.get((i, op, m), 0) for m in self.M_of[op])
+                    self.m += self.H_flag[i, op] == sum(self.x_h.get((i, op, m), 0) for m in self.M_of[op])                 #is it necessary?
                 else:
                     # Only arms available
                     self.m += sum(self.x_a.get((i, op, m), 0) for m in self.M_of[op]) == 1
                     for m in self.M_of[op]:
                         self.m += self.OP_flag[i, op, m] == self.x_a.get((i, op, m), 0)
-                        self.m += self.OP_flag[i, op, m] <= 1
                     self.m += self.H_flag[i, op] == 0  # No human work
 
         # --- Force K1 and K2 on the same kitting workstation ---
-        for i in self.I:
+        for i in self.I:                                                                                                    #OK
             if self.z.get((i, K1), 0) and self.z.get((i, K2), 0):
                 for m in self.WS_KITTING:
                     self.m += self.OP_flag[i, K1, m] == self.OP_flag[i, K2, m]
 
-        # durations
+        # durations                                                                                                         #OK
         for i in self.I:
             for op in self.OPS:
                 if not self.z[i, op]: continue
@@ -402,7 +399,6 @@ class FJTransportProblem(FJProblem):
         def _k_ops(i):  return [op for op in self.OPS_i[i] if op in (K1, K2)]
         def _b_ops(i):  return [op for op in self.OPS_i[i] if op in (B1, B2)]
 
-        WS_ASM = self.WS_GRIP + self.WS_SCREW
 
         for i in self.I:
             kops = _k_ops(i)
@@ -417,8 +413,8 @@ class FJTransportProblem(FJProblem):
             for trans in stage_transitions:
                 if trans == KB and kops and bops:
                     # Kitting to Assembly
-                    prevK, firstB = kops[-1], bops[0]
-                    self.m += self.S_T[i, KB] >= self.E[i, prevK]
+                    lastK, firstB = kops[-1], bops[0]
+                    self.m += self.S_T[i, KB] >= self.E[i, lastK]
                     self.m += self.S[i, firstB] >= self.E_T[i, KB]
                 elif trans == BP and bops and self.z[i, P]:
                     # Assembly to Packing
