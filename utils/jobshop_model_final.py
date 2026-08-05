@@ -1533,9 +1533,11 @@ class FJTransportProblemFinal:
         return {v: v.value() for v in vars_list if v.value() is not None}
 
     def solve(self, objectives=None, image=None, disjunctive=False, iter=None, timeout=360, solver='ortools',
-              nadir_points=None, diversification='base', trade_offs=None, c_ucb=2, solution_hint=False):
+              nadir_points=None, diversification='base', trade_offs=None, c_ucb=2, solution_hint=False,
+              return_timings=False):
+        solver_name = solver
         if image is None:
-            start = time.time()
+            start = time.perf_counter()
             if objectives is None:
                 self.model.minimize(self.objectives['makespan'])
             else:
@@ -1555,8 +1557,10 @@ class FJTransportProblemFinal:
                         for obj_name in objectives
                     )
                 self.model.minimize(expr)
+            objective_end = time.perf_counter()
 
-            solver = SolverLookup.get(solver, self.model)
+            solver_obj = SolverLookup.get(solver_name, self.model)
+            native_model_end = time.perf_counter()
 
             if solution_hint:
                 # if isinstance(solution_hint, dict):
@@ -1572,11 +1576,12 @@ class FJTransportProblemFinal:
                 #         solver.solution_hint(h_vars, h_vals)
                 pass
 
-            solver.solve(time_limit=timeout)
-            end = time.time()
+            solve_start = time.perf_counter()
+            solver_obj.solve(time_limit=timeout)
+            end = time.perf_counter()
             elapsed = end - start
         else:
-            start = time.time()
+            start = time.perf_counter()
             expression = 1 / (iter)
             norm_w = self._scaled_norm_weights(objectives, nadir_points)
             expr_1 = (1 - expression) * sum(
@@ -1640,8 +1645,10 @@ class FJTransportProblemFinal:
                 ])
                 self.model += conditional_constraint_assumption.implies(not_same_image_constraint)
 
+            objective_end = time.perf_counter()
 
-            solver = SolverLookup.get(solver, self.model)
+            solver_obj = SolverLookup.get(solver_name, self.model)
+            native_model_end = time.perf_counter()
 
             if solution_hint:
                 # if isinstance(solution_hint, dict):
@@ -1657,10 +1664,11 @@ class FJTransportProblemFinal:
                 #         solver.solution_hint(h_vars, h_vals)
                 pass
 
-            solver.solve(time_limit=timeout,
-                         assumptions=[conditional_constraint_assumption], # Always pass the assumption
-                         log_search_progress=False)
-            end = time.time()
+            solve_start = time.perf_counter()
+            solver_obj.solve(time_limit=timeout,
+                             assumptions=[conditional_constraint_assumption], # Always pass the assumption
+                             log_search_progress=False)
+            end = time.perf_counter()
             elapsed = end - start
         objs = {
             name: (
@@ -1671,7 +1679,14 @@ class FJTransportProblemFinal:
             for name in objectives
         }
 
-        return elapsed, solver.status().exitstatus, objs
+        timings = {
+            "native_model_build_s": native_model_end - objective_end,
+            "solve_call_wall_s": end - solve_start,
+        }
+
+        if return_timings:
+            return elapsed, solver_obj.status().exitstatus, objs, timings
+        return elapsed, solver_obj.status().exitstatus, objs
 
     # --- helper: compute scaled normalized integer weights once ---
     def _scaled_norm_weights(self, objectives, nadir_points, scale=1e4):

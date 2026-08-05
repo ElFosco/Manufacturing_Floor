@@ -6,15 +6,37 @@ import time
 import argparse
 from utils.jobshop_model_final import FJTransportProblemFinal
 
+TIMING_COLUMNS = [
+    'task_decomposition_s',
+    'native_model_build_s',
+    'solve_call_wall_s',
+]
+
+
 def solve_problem(json_file, weights, timeout, symmetry_breaking, custom_bound, solver, use_no_overlap=False, nadir_points=None):
     problem = FJTransportProblemFinal(custom_bound=custom_bound, json_file=json_file, symmetry_breaking=symmetry_breaking, use_no_overlap=use_no_overlap)
+
+    decomposition_start = time.perf_counter()
     problem.make_model()
+    decomposition_end = time.perf_counter()
+
     objectives = ['makespan', 'workstations', 'employees', 'robots', 'employee_time']
     weights_dict = dict(zip(objectives, weights))
 
     # Pass nadir_points and solver
-    elapsed, status, objs = problem.solve(objectives=weights_dict, timeout=timeout, solver=solver, nadir_points=nadir_points)
-    return elapsed, status, objs
+    elapsed, status, objs, solve_timings = problem.solve(
+        objectives=weights_dict,
+        timeout=timeout,
+        solver=solver,
+        nadir_points=nadir_points,
+        return_timings=True,
+    )
+
+    timings = {
+        'task_decomposition_s': decomposition_end - decomposition_start,
+        **solve_timings,
+    }
+    return elapsed, status, objs, timings
 
 def main():
     parser = argparse.ArgumentParser(description="Solve problems from cp_model_data with user preferences.")
@@ -78,14 +100,20 @@ def main():
             
             try:
                 # Pass args.solver to solve_problem
-                elapsed, status, objs = solve_problem(json_file, weights, timeout, args.symmetry, args.lowerbound, args.solver, use_no_overlap=args.no_overlap)
-                print(f"    - Status: {status}, Time: {elapsed:.2f}s")
+                elapsed, status, objs, timings = solve_problem(json_file, weights, timeout, args.symmetry, args.lowerbound, args.solver, use_no_overlap=args.no_overlap)
+                print(
+                    f"    - Status: {status}, Time: {elapsed:.2f}s, "
+                    f"Decomposition: {timings['task_decomposition_s']:.2f}s, "
+                    f"Native build: {timings['native_model_build_s']:.2f}s, "
+                    f"Solve call: {timings['solve_call_wall_s']:.2f}s"
+                )
                 result = {
                     'user_index': actual_index,
                     'weights': weights.tolist(),
                     'status': status,
                     'elapsed': elapsed,
-                    'objectives': objs
+                    'objectives': objs,
+                    **timings,
                 }
             except Exception as e:
                 print(f"    - Error solving preference {actual_index}: {e}")
@@ -94,7 +122,8 @@ def main():
                     'weights': weights.tolist(),
                     'status': "ERROR",
                     'elapsed': 0,
-                    'objectives': {}
+                    'objectives': {},
+                    **{col: 0 for col in TIMING_COLUMNS},
                 }
             
             # Save result immediately after each solve (append to the freshly cleared file)
