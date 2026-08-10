@@ -4,6 +4,7 @@ import time
 from collections import defaultdict
 import cpmpy as cp
 from cpmpy import SolverLookup
+from cpmpy.solvers.solver_interface import ExitStatus
 from utils.utility import compute_makespan_lower_bound, compute_diversification_weights
 
 
@@ -1670,23 +1671,29 @@ class FJTransportProblemFinal:
                              log_search_progress=False)
             end = time.perf_counter()
             elapsed = end - start
-        objs = {
-            name: (
-                (1 / 3600) * self.objectives[name].value()
-                if name in {"makespan", "employee_time"}
-                else self.objectives[name].value()
-            )
-            for name in objectives
-        }
 
         timings = {
             "native_model_build_s": native_model_end - objective_end,
             "solve_call_wall_s": end - solve_start,
         }
 
+        status = solver_obj.status().exitstatus
+        objective_names = objectives if objectives is not None else self.objectives
+        if status in {ExitStatus.OPTIMAL, ExitStatus.FEASIBLE}:
+            objs = {
+                name: (
+                    (1 / 3600) * self.objectives[name].value()
+                    if name in {"makespan", "employee_time"}
+                    else self.objectives[name].value()
+                )
+                for name in objective_names
+            }
+        else:
+            objs = {}
+
         if return_timings:
-            return elapsed, solver_obj.status().exitstatus, objs, timings
-        return elapsed, solver_obj.status().exitstatus, objs
+            return elapsed, status, objs, timings
+        return elapsed, status, objs
 
     # --- helper: compute scaled normalized integer weights once ---
     def _scaled_norm_weights(self, objectives, nadir_points, scale=1e4):

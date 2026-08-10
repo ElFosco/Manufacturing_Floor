@@ -62,12 +62,20 @@ def main():
     if args.type:
         pattern = f'data/cp_model_data/data_training_{args.type}_*.json'
         print(f"Filtering for data type: {args.type}")
+        json_files = sorted(glob.glob(pattern))
     else:
-        pattern = 'data/cp_model_data/*.json'
-    
-    json_files = sorted(glob.glob(pattern))
+        patterns = [
+            'data/cp_model_data/data_training_1_*.json',
+            'data/cp_model_data/data_training_2_*.json',
+        ]
+        print("No data type specified; defaulting to training types 1 and 2.")
+        json_files = sorted(
+            json_file
+            for pattern in patterns
+            for json_file in glob.glob(pattern)
+        )
     if not json_files:
-        print(f"No JSON files found matching pattern: {pattern}")
+        print("No JSON files found.")
         return
     print(f"Found {len(json_files)} JSON files to process.")
 
